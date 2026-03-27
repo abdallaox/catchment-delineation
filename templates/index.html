@@ -749,8 +749,13 @@
       Subbasins
     </label>
 
+  </div>
+
+  <!-- River layer toggles (shown as soon as rivers are extracted) -->
+  <div class="section" id="river-section" style="display:none;">
+    <div class="sec-title" style="margin-bottom:6px;">River layers</div>
     <div class="toggle-row" style="cursor:default; display:flex; justify-content:space-between; align-items:center; border-bottom:none; padding-bottom:0;">
-      <span style="color:var(--muted2);font-size:11px;">Rivers by Strahler order</span>
+      <span style="color:var(--muted2);font-size:11px;">Toggle by Strahler order</span>
       <span style="font-size:10px;color:var(--muted2);cursor:pointer;" onclick="toggleAllOrders(true)">all</span>
       <span style="font-size:10px;color:var(--muted2);margin-left:4px;cursor:pointer;" onclick="toggleAllOrders(false)">none</span>
     </div>
@@ -1318,7 +1323,8 @@ function clearPreviewRivers() {
   Object.values(orderLayers).forEach(l => map.removeLayer(l));
   orderLayers = {};
   document.getElementById('order-toggles').innerHTML = '';
-  document.getElementById('map-legend').style.display = 'none';
+  document.getElementById('map-legend').style.display  = 'none';
+  document.getElementById('river-section').style.display = 'none';
 }
 
 let _riverRefreshTimer = null;
@@ -1440,6 +1446,7 @@ function buildOrderLayers(riverFC) {
 
   buildOrderToggles(orders);
   buildLegend(orders);
+  showRiverSection();
 }
 
 function buildOrderToggles(orders) {
@@ -1457,6 +1464,10 @@ function buildOrderToggles(orders) {
     `;
     container.appendChild(label);
   });
+}
+
+function showRiverSection() {
+  document.getElementById('river-section').style.display = 'block';
 }
 
 function buildLegend(orders) {
