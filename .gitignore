@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# DEM and raster files (large, downloaded on demand)
+*.tif
+*.tiff
+*.gpkg
+
+# Shapefiles and outputs
+outputs/
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.png
+*.geojson
+*.qgz
+
+# Results / exports
+catchment_results*
+cwi_results*
+
+# OS
+.DS_Store
+Thumbs.db

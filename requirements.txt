@@ -1,0 +1,10 @@
+flask==2.2.2
+rasterio==1.4.2
+pysheds==0.5
+numpy==1.24.4
+scipy==1.11.1
+geopandas==1.0.1
+shapely==2.0.6
+matplotlib==3.7.2
+requests==2.31.0
+gunicorn==21.2.0
