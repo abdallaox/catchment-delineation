@@ -372,6 +372,20 @@ def vectorize_labels(label_arr, catch_mask, basin_meta_list):
     return {k: _no_holes(v) for k, v in polys.items()}
 
 
+def _chaikin(coords, iterations=3):
+    """Chaikin corner-cutting: smooths a pixel-path into a curved polyline."""
+    for _ in range(iterations):
+        out = [coords[0]]
+        for i in range(len(coords) - 1):
+            x0, y0 = coords[i]
+            x1, y1 = coords[i + 1]
+            out.append([0.75*x0 + 0.25*x1, 0.75*y0 + 0.25*y1])
+            out.append([0.25*x0 + 0.75*x1, 0.25*y0 + 0.75*y1])
+        out.append(coords[-1])
+        coords = out
+    return coords
+
+
 def build_river_network(stream_mask, strahler):
     """Node-based polyline tracing — fully connected network."""
     fdir_arr = _cache["fdir_arr"]
@@ -416,6 +430,7 @@ def build_river_network(stream_mask, strahler):
                 coords.append([x2, y2]); cells.append((r, c))
                 break
         if len(coords) < 2: continue
+        coords = _chaikin(coords)
         ords = [int(strahler[rr, cc]) for rr, cc in cells if strahler[rr, cc] > 0]
         features.append({
             "type": "Feature",
