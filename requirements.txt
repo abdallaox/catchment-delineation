@@ -1,4 +1,5 @@
-flask==2.2.2
+flask==3.0.3
+werkzeug==3.0.3
 rasterio==1.4.2
 pysheds==0.5
 numpy==1.24.4
