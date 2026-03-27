@@ -574,12 +574,12 @@
   <!-- ── ANALYSIS TAB ─────────────────────────────── -->
   <div id="tab-analysis" class="tab-pane active">
 
-  <!-- Step 1: Place outlet -->
+  <!-- Step 1: Set download area -->
   <div class="section">
-    <div class="sec-title">Step 1 — Place outlet point</div>
+    <div class="sec-title">Step 1 — Set download area</div>
     <div class="instruction-pill">
       <div class="pulse-dot"></div>
-      <span id="instruction-text">Click anywhere on the world map to place your outlet point.</span>
+      <span id="instruction-text">Click anywhere on the map to centre the download area.</span>
     </div>
   </div>
 
@@ -1085,7 +1085,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   opacity: 0.65,
 }).addTo(map);
 map.setView([20, 0], 3);
-setStatus('Click anywhere on the world map to set an outlet point.', '');
+setStatus('Click anywhere on the map to centre the download area.', '');
 
 // Dedicated pane for DEM — always behind all vector/marker layers
 map.createPane('demPane');
@@ -1112,31 +1112,48 @@ map.on('mouseout', () => {
 
 // ── Click handler ─────────────────────────────────────────────────────────────
 map.on('click', e => {
-  clickedLatLng = e.latlng;
-
-  if (outletMarker) map.removeLayer(outletMarker);
-  outletMarker = L.circleMarker(e.latlng, {
-    radius: 8, color: '#fff', weight: 2.5,
-    fillColor: '#ff3333', fillOpacity: 1,
-  }).addTo(map).bindTooltip(
-    `Outlet: ${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)}`
-  );
-
-  document.getElementById('download-btn').disabled = false;
-
-  if (demLoaded) {
-    // DEM already downloaded — allow re-running directly
-    document.getElementById('run-btn').disabled = false;
+  if (!demLoaded) {
+    // Before DEM: just set the download centre
+    clickedLatLng = e.latlng;
+    if (outletMarker) map.removeLayer(outletMarker);
+    outletMarker = L.circleMarker(e.latlng, {
+      radius: 7, color: '#7ec8e3', weight: 2,
+      fillColor: '#1a4a6e', fillOpacity: 0.9,
+    }).addTo(map).bindTooltip(
+      `Download centre: ${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}`
+    );
+    document.getElementById('download-btn').disabled = false;
     document.getElementById('instruction-text').textContent =
-      `Outlet moved to (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}). ` +
-      'Click Run Analysis or re-download DEM with a larger radius.';
-    setStatus('Outlet repositioned — ready to run.', '');
+      `Area set at (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}). ` +
+      'Now click "Download DEM" to fetch the terrain.';
+    setStatus('Area set — click Download DEM.', '');
   } else {
-    document.getElementById('run-btn').disabled = true;
-    document.getElementById('instruction-text').textContent =
-      `Outlet set at (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}). ` +
-      'Click "Download DEM" to fetch terrain for this area.';
-    setStatus('Outlet placed — click Download DEM.', '');
+    // After DEM loaded: snap click to nearest stream
+    const acc = parseInt(document.getElementById('acc-slider').value);
+    fetch('/api/snap', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ lat: e.latlng.lat, lon: e.latlng.lng, acc_threshold: acc }),
+    })
+    .then(r => r.json())
+    .then(snap => {
+      if (snap.error) { setStatus('Snap error: ' + snap.error, 'error'); return; }
+      clickedLatLng = { lat: snap.lat, lng: snap.lon };
+      if (outletMarker) map.removeLayer(outletMarker);
+      outletMarker = L.circleMarker([snap.lat, snap.lon], {
+        radius: 8, color: '#fff', weight: 2.5,
+        fillColor: '#ff3333', fillOpacity: 1,
+      }).addTo(map).bindTooltip(
+        `<b>Outlet</b><br>Acc: ${snap.acc.toLocaleString()}${snap.snapped ? '<br><i>snapped to stream</i>' : ''}`
+      );
+      document.getElementById('run-btn').disabled = false;
+      document.getElementById('instruction-text').textContent =
+        `Outlet set${snap.snapped ? ' (snapped to stream)' : ''} at ` +
+        `(${snap.lat.toFixed(4)}, ${snap.lon.toFixed(4)}). ` +
+        'Adjust parameters then click Run Analysis.';
+      setStatus(`Outlet placed — acc ${snap.acc.toLocaleString()}. Ready to run.`, 'ok');
+    })
+    .catch(err => setStatus('Error: ' + err, 'error'));
   }
 });
 
@@ -1144,6 +1161,7 @@ map.on('click', e => {
 document.getElementById('acc-slider').addEventListener('input', function() {
   document.getElementById('acc-val').textContent = this.value;
   updateEffectLabels();
+  scheduleRiverRefresh();
 });
 document.getElementById('ord-slider').addEventListener('input', function() {
   document.getElementById('ord-val').textContent = this.value;
@@ -1233,17 +1251,23 @@ function downloadDEM() {
     document.getElementById('acc-val').textContent = p95;
     updateEffectLabels();
 
+    // Show river network
+    if (info.rivers && info.rivers.features.length) {
+      clearPreviewRivers();
+      buildOrderLayers(info.rivers);
+    }
+
     // Show DEM info card
     document.getElementById('dem-res-val').textContent = info.res_m + ' m';
     document.getElementById('dem-info').style.display = 'block';
 
-    // Enable run button
-    document.getElementById('run-btn').disabled = false;
+    // Keep run button disabled until outlet placed on river
+    document.getElementById('run-btn').disabled = true;
 
     document.getElementById('instruction-text').textContent =
-      `Terrain loaded (${info.res_m} m res). Re-click to refine outlet position, then run.`;
+      `Rivers extracted. Now click on any river to place your outlet point.`;
     setStatus(
-      `✓ DEM ready — ${info.shape[0]}×${info.shape[1]} cells · ${info.res_m} m resolution`,
+      `✓ DEM ready · ${info.res_m} m res · ${info.rivers ? info.rivers.features.length : 0} river segments — click a river to set outlet`,
       'ok'
     );
   })
@@ -1289,13 +1313,38 @@ function runDelineation() {
   });
 }
 
+// ── Preview river helpers ─────────────────────────────────────────────────────
+function clearPreviewRivers() {
+  Object.values(orderLayers).forEach(l => map.removeLayer(l));
+  orderLayers = {};
+  document.getElementById('order-toggles').innerHTML = '';
+  document.getElementById('map-legend').style.display = 'none';
+}
+
+let _riverRefreshTimer = null;
+function scheduleRiverRefresh() {
+  if (!demLoaded) return;
+  clearTimeout(_riverRefreshTimer);
+  _riverRefreshTimer = setTimeout(() => {
+    const acc = parseInt(document.getElementById('acc-slider').value);
+    fetch('/api/rivers', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ acc_threshold: acc }),
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.rivers) { clearPreviewRivers(); buildOrderLayers(data.rivers); }
+    });
+  }, 600);
+}
+
 // ── Display results ───────────────────────────────────────────────────────────
 function clearResultLayers() {
   ['catchment','subbasins'].forEach(k => {
     if (mainLayers[k]) { map.removeLayer(mainLayers[k]); mainLayers[k] = null; }
   });
-  Object.values(orderLayers).forEach(l => map.removeLayer(l));
-  orderLayers = {};
+  clearPreviewRivers();
 }
 
 function displayResults(data) {
@@ -1469,7 +1518,7 @@ function resetAll() {
   document.getElementById('order-toggles').innerHTML       = '';
   document.getElementById('tog-dem').checked               = true;
   document.getElementById('instruction-text').textContent  =
-    'Click anywhere on the world map to place your outlet point.';
+    'Click anywhere on the map to centre the download area.';
   setStatus('Reset — click the map to place a new outlet point.', '');
   map.setView([20, 0], 3);
 }

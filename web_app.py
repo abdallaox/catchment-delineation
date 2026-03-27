@@ -316,6 +316,17 @@ def compute_strahler(stream_mask):
     return order
 
 
+def extract_rivers_global(acc_threshold):
+    """Extract full river network from cached DEM at given threshold."""
+    if not _cache:
+        return {"type": "FeatureCollection", "features": []}
+    stream_mask = _cache["acc_arr"] >= acc_threshold
+    if not stream_mask.any():
+        return {"type": "FeatureCollection", "features": []}
+    strahler = compute_strahler(stream_mask)
+    return build_river_network(stream_mask, strahler)
+
+
 def _no_holes(geom):
     """Strip interior rings (holes) from a Polygon or MultiPolygon."""
     from shapely.geometry import Polygon, MultiPolygon
@@ -557,14 +568,55 @@ def api_fetch_dem():
         w   = _cache["bounds_wgs"]
         acc = _cache["acc_arr"]
         p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
+        default_acc = int(round(p95 / 50) * 50)
+        rivers = extract_rivers_global(default_acc)
         return jsonify({
-            "bounds": {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
-            "res_m":  round(abs(_cache["affine"].a) * 111320, 1),
-            "shape":  list(_cache["shape"]),
-            "acc_p95": p95,
+            "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
+            "res_m":       round(abs(_cache["affine"].a) * 111320, 1),
+            "shape":       list(_cache["shape"]),
+            "acc_p95":     p95,
+            "default_acc": default_acc,
+            "rivers":      rivers,
         })
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/snap", methods=["POST"])
+def api_snap():
+    """Snap a lat/lon to the nearest stream cell."""
+    data = request.json or {}
+    if not _cache:
+        return jsonify({"error": "No DEM loaded"}), 400
+    try:
+        lat           = float(data["lat"])
+        lon           = float(data["lon"])
+        acc_threshold = int(data.get("acc_threshold", 500))
+        row, col      = latlon_to_rowcol(lat, lon)
+        s_row, s_col  = snap_to_stream(row, col, acc_threshold)
+        ox, oy        = rio_transform.xy(_cache["affine"], s_row, s_col)
+        return jsonify({
+            "lat":     float(oy),
+            "lon":     float(ox),
+            "snapped": (s_row != row or s_col != col),
+            "acc":     int(_cache["acc_arr"][s_row, s_col]),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/rivers", methods=["POST"])
+def api_rivers():
+    """Re-extract river network for a given accumulation threshold."""
+    data = request.json or {}
+    if not _cache:
+        return jsonify({"error": "No DEM loaded"}), 400
+    try:
+        acc_threshold = int(data.get("acc_threshold", 500))
+        rivers = extract_rivers_global(acc_threshold)
+        return jsonify({"rivers": rivers})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/dem_info")
