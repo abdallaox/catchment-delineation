@@ -459,8 +459,7 @@ def extract_rivers_global(acc_threshold):
             rc[acc_threshold] = {"type": "FeatureCollection", "features": []}
         else:
             print(f"  Building river network (threshold={acc_threshold})…")
-            strahler = _get_strahler(acc_threshold)
-            rc[acc_threshold] = build_river_network(stream_mask, strahler)
+            rc[acc_threshold] = build_river_network(stream_mask)
             print(f"  {len(rc[acc_threshold]['features'])} river segments")
     return rc[acc_threshold]
 
@@ -498,48 +497,94 @@ def _chaikin(coords, iterations=3):
     return coords
 
 
-def build_river_network(stream_mask, strahler):
+def build_river_network(stream_mask, _strahler=None):
+    """
+    Build river network with segment-level Strahler ordering.
+    Strahler rules are applied between segments (reaches), not individual cells,
+    so order is always consistent: two tributaries of order N → one of order N+1.
+    """
+    from collections import defaultdict
     fdir_arr = _cache["fdir_arr"]
     acc_arr  = _cache["acc_arr"]
     affine   = _cache["affine"]
     nrows, ncols = _cache["shape"]
+
+    # --- Count upstream / downstream stream neighbours ---
     n_up = np.zeros((nrows, ncols), dtype=np.int8)
     n_dn = np.zeros((nrows, ncols), dtype=np.int8)
-    for (dr,dc), dir_val in DELTA_TO_DIR.items():
-        needed = DELTA_TO_DIR.get((-dr,-dc))
-        if needed is None: continue
+    for (dr, dc), dir_val in DELTA_TO_DIR.items():
+        needed = DELTA_TO_DIR.get((-dr, -dc))
+        if needed is None:
+            continue
         rh, ch, rn, cn = _d8_slices(dr, dc, nrows, ncols)
-        contrib = stream_mask[rn,cn] & (fdir_arr[rn,cn] == needed)
-        n_up[rh,ch] += contrib.view(np.uint8)
-        flows = stream_mask[rh,ch] & (fdir_arr[rh,ch] == dir_val) & stream_mask[rn,cn]
-        n_dn[rh,ch] |= flows.view(np.uint8)
-    nodes = {(r,c) for r,c in zip(*np.where(stream_mask))
-             if n_up[r,c]==0 or n_up[r,c]>=2 or n_dn[r,c]==0}
-    features = []
+        contrib = stream_mask[rn, cn] & (fdir_arr[rn, cn] == needed)
+        n_up[rh, ch] += contrib.view(np.uint8)
+        flows = stream_mask[rh, ch] & (fdir_arr[rh, ch] == dir_val) & stream_mask[rn, cn]
+        n_dn[rh, ch] |= flows.view(np.uint8)
+
+    nodes = {(r, c) for r, c in zip(*np.where(stream_mask))
+             if n_up[r, c] == 0 or n_up[r, c] >= 2 or n_dn[r, c] == 0}
+
+    # --- Trace all segments from each node ---
+    seg_list = []
     for (sr, sc) in nodes:
         coords, cells = [], []
         r, c = sr, sc
         while True:
             x, y = rio_transform.xy(affine, r, c)
-            coords.append([x,y]); cells.append((r,c))
-            d = fdir_arr[r,c]
-            if d not in D8_DELTAS: break
-            dr, dc = D8_DELTAS[d]
-            nr, nc = r+dr, c+dc
-            if not (0<=nr<nrows and 0<=nc<ncols) or not stream_mask[nr,nc]: break
-            r, c = nr, nc
-            if (r,c) in nodes:
-                x2,y2 = rio_transform.xy(affine,r,c)
-                coords.append([x2,y2]); cells.append((r,c))
+            coords.append([x, y])
+            cells.append((r, c))
+            d = fdir_arr[r, c]
+            if d not in D8_DELTAS:
                 break
-        if len(coords) < 2: continue
-        coords = _chaikin(coords)
-        ords = [int(strahler[rr,cc]) for rr,cc in cells if strahler[rr,cc]>0]
+            dr, dc = D8_DELTAS[d]
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < nrows and 0 <= nc < ncols) or not stream_mask[nr, nc]:
+                break
+            r, c = nr, nc
+            if (r, c) in nodes:
+                x2, y2 = rio_transform.xy(affine, r, c)
+                coords.append([x2, y2])
+                cells.append((r, c))
+                break
+        if len(coords) < 2:
+            continue
+        seg_list.append({'start': (sr, sc), 'end': (r, c),
+                         'coords': coords, 'cells': cells})
+
+    # --- Segment-level Strahler ---
+    # For each node, which segments flow INTO it (end there)
+    segs_into = defaultdict(list)
+    for i, seg in enumerate(seg_list):
+        segs_into[seg['end']].append(i)
+
+    seg_order = [0] * len(seg_list)
+    # Sort by start-node accumulation (ascending) so headwaters are processed first
+    for i in sorted(range(len(seg_list)),
+                    key=lambda k: int(acc_arr[seg_list[k]['start']])):
+        sr, sc = seg_list[i]['start']
+        if n_up[sr, sc] == 0:
+            seg_order[i] = 1          # true headwater — always order 1
+        else:
+            incoming = [seg_order[j] for j in segs_into[(sr, sc)]
+                        if seg_order[j] > 0]
+            if not incoming:
+                seg_order[i] = 1
+            else:
+                mx = max(incoming)
+                # Classic Strahler: promote only when ≥2 tributaries share the max order
+                seg_order[i] = mx + 1 if incoming.count(mx) >= 2 else mx
+
+    # --- GeoJSON features ---
+    features = []
+    for i, seg in enumerate(seg_list):
+        sr, sc = seg['start']
         features.append({
             "type": "Feature",
-            "geometry": {"type": "LineString", "coordinates": coords},
-            "properties": {"order": max(ords) if ords else 1,
-                           "acc": int(acc_arr[sr,sc])}
+            "geometry": {"type": "LineString",
+                         "coordinates": _chaikin(seg['coords'])},
+            "properties": {"order": seg_order[i],
+                           "acc": int(acc_arr[sr, sc])}
         })
     return {"type": "FeatureCollection", "features": features}
 
@@ -936,6 +981,42 @@ def api_export(fmt):
                          as_attachment=True, download_name="catchment_results.zip")
 
     return jsonify({"error": f"Unknown format: {fmt}"}), 400
+
+
+@app.route("/api/upload_shapefile", methods=["POST"])
+def api_upload_shapefile():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+    fname = f.filename.lower()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            if fname.endswith(".zip"):
+                zip_path = os.path.join(td, "upload.zip")
+                f.save(zip_path)
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(td)
+                shp_files = [os.path.join(td, n) for n in os.listdir(td)
+                             if n.lower().endswith(".shp")]
+                if not shp_files:
+                    return jsonify({"error": "No .shp file found in ZIP"}), 400
+                read_path = shp_files[0]
+                layer_name = os.path.splitext(os.path.basename(read_path))[0]
+            elif fname.endswith((".shp", ".geojson", ".json")):
+                read_path = os.path.join(td, f.filename)
+                f.save(read_path)
+                layer_name = os.path.splitext(f.filename)[0]
+            else:
+                return jsonify({"error": "Upload a ZIP (containing .shp) or a .shp / .geojson file"}), 400
+            os.environ['SHAPE_RESTORE_SHX'] = 'YES'
+            gdf = gpd.read_file(read_path)
+            if gdf.crs and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs(4326)
+            return jsonify({"geojson": json.loads(gdf.to_json()), "name": layer_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

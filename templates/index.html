@@ -84,6 +84,18 @@
     .btn-row  { display:flex; gap:8px; }
     .btn-row .btn { flex:1; }
     .btn-sm   { font-size:11px; padding:6px 10px; width:auto; }
+    .btn-upload { background:#2a1a4a; color:#b090ff; border:1px dashed #5a3a8a; }
+    .btn-upload:hover { background:#3a2060; }
+
+    /* Uploaded layers list */
+    .upload-layer-item { display:flex; align-items:center; gap:6px; padding:4px 0;
+                         font-size:12px; border-bottom:1px solid #111e2c; }
+    .upload-layer-item:last-child { border-bottom:none; }
+    .upload-layer-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+    .upload-layer-name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .upload-layer-rm { background:none; border:none; color:var(--muted2); cursor:pointer;
+                       font-size:14px; padding:0 2px; line-height:1; }
+    .upload-layer-rm:hover { color:var(--error); }
 
     #status-box { background:#08121c; border-radius:5px; padding:8px 10px; font-size:11px;
                   color:var(--muted); min-height:34px; font-family:monospace; line-height:1.5;
@@ -304,6 +316,21 @@
     <div id="status-box">Ready — click on a stream to place an outlet.</div>
   </div>
 
+  <!-- Upload shapefile -->
+  <div class="section">
+    <div class="sec-title">Upload layers</div>
+    <input type="file" id="shp-file-input" accept=".zip,.shp,.geojson,.json"
+           style="display:none;" onchange="handleShapefileUpload(this)"/>
+    <button class="btn btn-upload" onclick="document.getElementById('shp-file-input').click()">
+      &#8679;&nbsp; Upload Shapefile / GeoJSON
+    </button>
+    <div style="font-size:10px; color:var(--muted2); margin-top:5px;">
+      Accepts: ZIP (with .shp), .shp, .geojson, .json
+    </div>
+    <div id="upload-status" style="font-size:11px; margin-top:6px; min-height:16px;"></div>
+    <div id="upload-layer-list" style="margin-top:6px;"></div>
+  </div>
+
   <!-- Export -->
   <div class="section" id="export-section" style="display:none;">
     <div class="sec-title">Export results</div>
@@ -346,7 +373,13 @@
 
       <div class="method-step">
         <div class="method-step-title">4 · River Network &amp; Strahler Ordering</div>
-        <p>Stream cells are identified where <code>acc ≥ threshold</code>. The Strahler stream order is computed on-the-fly by pysheds. River polylines are extracted by walking the D8 flow graph between network junctions, then smoothed with <strong>Chaikin corner-cutting</strong> (3 iterations) for display.</p>
+        <p>Stream cells are identified where <code>acc ≥ threshold</code> (user-adjustable). River <strong>segments</strong> are traced by walking the D8 flow graph between topological nodes — headwaters (<code>n_upstream = 0</code>), confluences (<code>n_upstream ≥ 2</code>), and outlets. Strahler ordering is then assigned at the <strong>segment level</strong>:</p>
+        <ul>
+          <li>Headwater segments are always <strong>order 1</strong> (regardless of cell-level accumulation artefacts upstream)</li>
+          <li>At a confluence, if two or more tributaries share the same maximum order <em>N</em>, the downstream segment becomes <strong>order N+1</strong>; otherwise it inherits <strong>order N</strong></li>
+          <li>Segments are processed in topological order (ascending accumulation) to guarantee consistent propagation</li>
+        </ul>
+        <p style="margin-top:4px;">This segment-level approach eliminates the cell-level noise that arises from applying Strahler rules per pixel. River polylines are smoothed with <strong>Chaikin corner-cutting</strong> (3 iterations) for display.</p>
       </div>
 
       <div class="method-step">
@@ -360,15 +393,20 @@
       </div>
 
       <div class="method-step">
-        <div class="method-step-title">7 · Export</div>
+        <div class="method-step-title">7 · Upload External Layers</div>
+        <p>Any vector dataset can be overlaid on the map by uploading a <strong>Shapefile ZIP</strong> (containing .shp, .dbf, .shx, .prj), a bare <strong>.shp</strong>, or a <strong>GeoJSON</strong> file. The server reprojects non-WGS84 datasets to EPSG:4326 with GeoPandas before returning GeoJSON to the browser. Each uploaded layer receives a unique colour and can be removed individually from the sidebar.</p>
+      </div>
+
+      <div class="method-step">
+        <div class="method-step-title">8 · Export</div>
         <p>Results are packaged as a <strong>ZIP archive</strong> containing:</p>
         <ul>
-          <li><code>catchment_results.gpkg</code> — catchments, outlets, river network (vector)</li>
-          <li><code>dem.tif</code> — clipped SRTM elevation raster (Float32, LZW)</li>
-          <li><code>flow_accumulation.tif</code> — upstream cell count raster (Float32)</li>
-          <li><code>flow_direction.tif</code> — D8 direction codes raster (Int16)</li>
+          <li><code>catchment_results.gpkg</code> (or Shapefiles) — outlet points and river network (vector, WGS84)</li>
+          <li><code>dem.tif</code> — clipped SRTM elevation raster (Float32, LZW-compressed)</li>
+          <li><code>flow_accumulation.tif</code> — upstream contributing-cell count raster (Float32)</li>
+          <li><code>flow_direction.tif</code> — D8 direction codes raster (Int16; values: 1, 2, 4, 8, 16, 32, 64, 128)</li>
         </ul>
-        <p style="margin-top:4px;">All rasters use the original WGS84 projection and affine transform of the clipped DEM.</p>
+        <p style="margin-top:4px;">All rasters preserve the original WGS84 projection and affine transform of the clipped DEM. Catchment polygons are not included in the export — delineation boundaries are derived on-the-fly from the flow-direction raster and are always reproducible from it.</p>
       </div>
 
       <div class="method-step" style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
@@ -728,7 +766,7 @@ function buildOrderLayers(riverFC) {
     const fc = { type:'FeatureCollection', features: riverFC.features.filter(f => f.properties.order===ord) };
     orderLayers[ord] = L.geoJSON(fc, {
       style: { color:riverColor(ord), weight:riverWeight(ord), opacity:0.9 },
-      onEachFeature: (f,layer) => layer.bindTooltip(`<b>Order ${ord}</b><br>Acc: ${f.properties.acc.toLocaleString()}`)
+      onEachFeature: (f,layer) => layer.bindTooltip(`Strahler order ${ord}`)
     }).addTo(map);
   });
   buildOrderToggles(orders);
@@ -865,6 +903,69 @@ function switchTab(name) {
 // ── Export ────────────────────────────────────────────────────────────────────
 function exportResult(fmt) { window.location.href = '/api/export/' + fmt; }
 
+// ── Shapefile upload ──────────────────────────────────────────────────────────
+const _uploadedLayers = {};  // name → { layer, color }
+const _uploadColors = ['#b090ff','#ff9055','#55ddaa','#ff6688','#66ccff','#ffdd55','#aaffaa','#ff88cc'];
+let _uploadColorIdx = 0;
+
+function _uploadMsg(msg, color) {
+  const el = document.getElementById('upload-status');
+  el.textContent = msg;
+  el.style.color = color || 'var(--muted)';
+}
+
+function handleShapefileUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';  // allow re-upload of same file
+  const fd = new FormData();
+  fd.append('file', file);
+  _uploadMsg('Uploading ' + file.name + '…', 'var(--muted)');
+  fetch('/api/upload_shapefile', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) { _uploadMsg('Error: ' + data.error, 'var(--error)'); return; }
+      const color = _uploadColors[_uploadColorIdx % _uploadColors.length];
+      _uploadColorIdx++;
+      let name = data.name;
+      let n = 1;
+      while (_uploadedLayers[name]) { name = data.name + '_' + (++n); }
+      const layer = L.geoJSON(data.geojson, {
+        style: { color, weight: 2, fillColor: color, fillOpacity: 0.15 },
+        pointToLayer: (f, ll) => L.circleMarker(ll, {
+          radius: 5, color, fillColor: color, fillOpacity: 0.7, weight: 1.5
+        })
+      }).addTo(map);
+      _uploadedLayers[name] = { layer, color };
+      _renderUploadList();
+      try { map.fitBounds(layer.getBounds()); } catch(e) {}
+      _uploadMsg('"' + name + '" loaded (' + data.geojson.features.length + ' features)', 'var(--success)');
+    })
+    .catch(e => _uploadMsg('Upload failed: ' + e, 'var(--error)'));
+}
+
+function _renderUploadList() {
+  const el = document.getElementById('upload-layer-list');
+  const names = Object.keys(_uploadedLayers);
+  if (!names.length) { el.innerHTML = ''; return; }
+  el.innerHTML = names.map(n => {
+    const c = _uploadedLayers[n].color;
+    return `<div class="upload-layer-item">
+      <span class="upload-layer-dot" style="background:${c};"></span>
+      <span class="upload-layer-name" title="${n}">${n}</span>
+      <button class="upload-layer-rm" onclick="removeUploadedLayer('${n}')" title="Remove">&#x2715;</button>
+    </div>`;
+  }).join('');
+}
+
+function removeUploadedLayer(name) {
+  if (_uploadedLayers[name]) {
+    map.removeLayer(_uploadedLayers[name].layer);
+    delete _uploadedLayers[name];
+    _renderUploadList();
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function setStatus(msg, cls) {
   const el = document.getElementById('status-box');
@@ -884,6 +985,48 @@ function hideLoader() {
 }
 
 updateEffectLabel();
+
+// ── Middle-mouse-button pan (polygon + rectangle draw tools) ──────────────────
+(function() {
+  const container = map.getContainer();
+  let panning = false, lastX = 0, lastY = 0;
+
+  // Patch Leaflet's internal _fireDOMEvent so middle-button mousedown is
+  // silently swallowed BEFORE it ever reaches Leaflet.draw's _onMouseDown.
+  // This is the only reliable intercept point — DOM-level capture can't fire
+  // before Leaflet's already-registered bubble listener on the same element.
+  const _origFire = map._fireDOMEvent.bind(map);
+  map._fireDOMEvent = function(nativeEvt, type, targets) {
+    if (type === 'mousedown' && nativeEvt && nativeEvt.button === 1) {
+      nativeEvt.preventDefault(); // kill browser autoscroll cursor
+      return;                     // skip Leaflet draw handler entirely
+    }
+    return _origFire(nativeEvt, type, targets);
+  };
+
+  // Raw DOM listeners for the pan itself
+  document.addEventListener('mousedown', function(e) {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    panning = true;
+    lastX   = e.clientX;
+    lastY   = e.clientY;
+    container.style.cursor = 'grabbing';
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!panning) return;
+    map.panBy([-(e.clientX - lastX), -(e.clientY - lastY)], { animate: false });
+    lastX = e.clientX;
+    lastY = e.clientY;
+  });
+
+  document.addEventListener('mouseup', function(e) {
+    if (e.button !== 1) return;
+    panning = false;
+    container.style.cursor = '';
+  });
+})();
 </script>
 </body>
 </html>
