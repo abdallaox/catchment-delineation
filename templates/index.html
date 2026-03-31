@@ -6,554 +6,192 @@
   <title>Catchment Delineation Tool</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
     :root {
-      --bg:       #0f1923;
-      --panel:    #131f2e;
-      --panel2:   #0d1a27;
-      --border:   #1e3045;
-      --accent:   #7ec8e3;
-      --accent2:  #5baee8;
-      --text:     #d4dfe8;
-      --muted:    #6b829a;
-      --muted2:   #3e5a72;
-      --success:  #6ec99a;
-      --warn:     #e8c46e;
-      --error:    #e07070;
+      --bg: #0f1923; --panel: #131f2e; --panel2: #0d1a27;
+      --border: #1e3045; --accent: #7ec8e3; --accent2: #5baee8;
+      --text: #d4dfe8; --muted: #6b829a; --muted2: #3e5a72;
+      --success: #6ec99a; --warn: #e8c46e; --error: #e07070;
     }
+    body { font-family:'Segoe UI',system-ui,sans-serif; font-size:13px;
+           display:flex; height:100vh; overflow:hidden; background:var(--bg); color:var(--text); }
 
-    body {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 13px;
-      display: flex;
-      height: 100vh;
-      overflow: hidden;
-      background: var(--bg);
-      color: var(--text);
-    }
+    /* ── Sidebar ── */
+    #sidebar { width:320px; min-width:320px; background:var(--panel);
+               display:flex; flex-direction:column; border-right:1px solid var(--border); overflow:hidden; }
+    #tab-analysis, #tab-method { overflow-y:auto; flex:1; }
+    #tab-analysis::-webkit-scrollbar, #tab-method::-webkit-scrollbar { width:4px; }
+    #tab-analysis::-webkit-scrollbar-thumb, #tab-method::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
 
-    /* ── Sidebar ─────────────────────────────────────── */
-    #sidebar {
-      width: 320px;
-      min-width: 320px;
-      background: var(--panel);
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--border);
-      overflow: hidden;
-    }
-    #tab-analysis {
-      overflow-y: auto;
-      flex: 1;
-    }
-    #tab-docs {
-      overflow-y: auto;
-      flex: 1;
-    }
-    #tab-analysis::-webkit-scrollbar,
-    #tab-docs::-webkit-scrollbar { width: 4px; }
-    #tab-analysis::-webkit-scrollbar-thumb,
-    #tab-docs::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .s-head { padding:16px; background:var(--panel2); border-bottom:1px solid var(--border); flex-shrink:0; }
+    .s-head h1 { font-size:14px; font-weight:700; color:var(--accent); letter-spacing:.3px; }
+    .s-head p  { font-size:11px; color:var(--muted); margin-top:3px; }
 
-    .s-head {
-      padding: 16px;
-      background: var(--panel2);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .s-head h1 { font-size: 14px; font-weight: 700; color: var(--accent); letter-spacing: .3px; }
-    .s-head p  { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .section { padding:14px 16px; border-bottom:1px solid var(--border); }
+    .sec-title { font-size:10px; font-weight:700; letter-spacing:1px; color:var(--muted2);
+                 text-transform:uppercase; margin-bottom:10px; }
 
-    .section {
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-    }
-    .sec-title {
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 1px;
-      color: var(--muted2);
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
+    .instruction-pill { display:flex; align-items:center; gap:9px; background:#0b1d2e;
+                        border:1px solid #1a3d5c; border-radius:7px; padding:10px 12px;
+                        font-size:12px; color:var(--accent); line-height:1.4; }
+    .pulse-dot { width:9px; height:9px; border-radius:50%; background:var(--accent);
+                 flex-shrink:0; animation:pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(1.4)} }
 
-    /* Instructions pill */
-    .instruction-pill {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      background: #0b1d2e;
-      border: 1px solid #1a3d5c;
-      border-radius: 7px;
-      padding: 10px 12px;
-      font-size: 12px;
-      color: var(--accent);
-      line-height: 1.4;
-    }
-    .pulse-dot {
-      width: 9px; height: 9px;
-      border-radius: 50%;
-      background: var(--accent);
-      flex-shrink: 0;
-      animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-      0%,100% { opacity:1; transform:scale(1); }
-      50%      { opacity:.4; transform:scale(1.4); }
-    }
+    .param-block { margin-bottom:14px; }
+    .param-block:last-child { margin-bottom:0; }
+    .param-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:5px; }
+    .param-name { font-size:12px; color:var(--text); font-weight:600; display:flex; align-items:center; gap:5px; }
+    .param-val  { font-size:13px; font-weight:700; color:var(--accent); min-width:38px; text-align:right; }
 
-    /* Parameters */
-    .param-block { margin-bottom: 14px; }
-    .param-block:last-child { margin-bottom: 0; }
+    .help-icon { display:inline-flex; align-items:center; justify-content:center;
+                 width:15px; height:15px; border-radius:50%; background:var(--border);
+                 color:var(--muted); font-size:9px; font-weight:700; cursor:help;
+                 flex-shrink:0; position:relative; }
+    .help-icon:hover .tooltip-box { display:block; }
+    .tooltip-box { display:none; position:absolute; left:22px; top:-4px; width:210px;
+                   background:#0a1520; border:1px solid var(--border); border-radius:6px;
+                   padding:8px 10px; font-size:11px; color:var(--text); line-height:1.5;
+                   z-index:9999; pointer-events:none; box-shadow:0 4px 16px rgba(0,0,0,.5); }
+    .tooltip-box strong { color:var(--accent); }
 
-    .param-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 5px;
-    }
-    .param-name {
-      font-size: 12px;
-      color: var(--text);
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-    .param-val {
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--accent);
-      min-width: 38px;
-      text-align: right;
-    }
+    input[type=range] { width:100%; height:4px; appearance:none; background:var(--border);
+                        border-radius:4px; outline:none; cursor:pointer; margin-bottom:4px; }
+    input[type=range]::-webkit-slider-thumb { appearance:none; width:14px; height:14px;
+                        border-radius:50%; background:var(--accent); cursor:pointer;
+                        box-shadow:0 0 0 3px rgba(126,200,227,.2); }
+    .range-labels { display:flex; justify-content:space-between; font-size:10px; color:var(--muted2); }
+    .param-effect { font-size:10px; color:var(--muted2); margin-top:3px; font-style:italic; }
 
-    /* Help icon + tooltip */
-    .help-icon {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 15px; height: 15px;
-      border-radius: 50%;
-      background: var(--border);
-      color: var(--muted);
-      font-size: 9px;
-      font-weight: 700;
-      cursor: help;
-      flex-shrink: 0;
-      position: relative;
-    }
-    .help-icon:hover .tooltip-box { display: block; }
-    .tooltip-box {
-      display: none;
-      position: absolute;
-      left: 22px;
-      top: -4px;
-      width: 210px;
-      background: #0a1520;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px 10px;
-      font-size: 11px;
-      color: var(--text);
-      line-height: 1.5;
-      z-index: 9999;
-      pointer-events: none;
-      box-shadow: 0 4px 16px rgba(0,0,0,.5);
-    }
-    .tooltip-box strong { color: var(--accent); }
+    .btn { display:flex; align-items:center; justify-content:center; gap:6px; width:100%;
+           padding:10px; border:none; border-radius:6px; font-size:13px; font-weight:600;
+           cursor:pointer; transition:background .15s, transform .1s; }
+    .btn:active:not(:disabled) { transform:scale(.98); }
+    .btn-primary { background:#1667a0; color:#fff; }
+    .btn-primary:hover:not(:disabled) { background:#1a7ebd; }
+    .btn-primary:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+    .btn-danger  { background:#2a1a1a; color:#c07070; border:1px solid #3d2020; }
+    .btn-danger:hover  { background:#3a2020; }
+    .btn-download { background:#1a4a6e; color:var(--accent); border:1px solid #1e3d5c; }
+    .btn-download:hover:not(:disabled) { background:#1e5a86; }
+    .btn-download:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+    .btn-gpkg { background:#1a5c38; color:#fff; margin-bottom:7px; }
+    .btn-gpkg:hover { background:#1f7046; }
+    .btn-shp  { background:var(--border); color:var(--accent); }
+    .btn-shp:hover  { background:#243a55; }
+    .btn-row  { display:flex; gap:8px; }
+    .btn-row .btn { flex:1; }
+    .btn-sm   { font-size:11px; padding:6px 10px; width:auto; }
 
-    input[type=range] {
-      width: 100%;
-      height: 4px;
-      appearance: none;
-      background: var(--border);
-      border-radius: 4px;
-      outline: none;
-      cursor: pointer;
-      margin-bottom: 4px;
-    }
-    input[type=range]::-webkit-slider-thumb {
-      appearance: none;
-      width: 14px; height: 14px;
-      border-radius: 50%;
-      background: var(--accent);
-      cursor: pointer;
-      box-shadow: 0 0 0 3px rgba(126,200,227,.2);
-    }
-    .range-labels {
-      display: flex;
-      justify-content: space-between;
-      font-size: 10px;
-      color: var(--muted2);
-    }
-    .param-effect {
-      font-size: 10px;
-      color: var(--muted2);
-      margin-top: 3px;
-      font-style: italic;
-    }
+    #status-box { background:#08121c; border-radius:5px; padding:8px 10px; font-size:11px;
+                  color:var(--muted); min-height:34px; font-family:monospace; line-height:1.5;
+                  border:1px solid var(--border); margin-top:10px; }
+    #status-box.ok    { color:var(--success); }
+    #status-box.error { color:var(--error); }
+    #status-box.warn  { color:var(--warn); }
 
-    /* Buttons */
-    .btn {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 6px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background .15s, transform .1s;
-    }
-    .btn:active:not(:disabled) { transform: scale(.98); }
-    .btn-run {
-      background: #1667a0;
-      color: #fff;
-    }
-    .btn-run:hover:not(:disabled) { background: #1a7ebd; }
-    .btn-run:disabled { background: #1a2d40; color: var(--muted2); cursor: not-allowed; }
-    .btn-reset {
-      background: #2a1a1a;
-      color: #c07070;
-      border: 1px solid #3d2020;
-    }
-    .btn-reset:hover { background: #3a2020; }
-    .btn-download { background: #1a4a6e; color: #7ec8e3; border: 1px solid #1e3d5c; margin-bottom: 0; }
-    .btn-download:hover:not(:disabled) { background: #1e5a86; }
-    .btn-download:disabled { background: #1a2d40; color: var(--muted2); cursor: not-allowed; }
-    .btn-gpkg { background: #1a5c38; color: #fff; margin-bottom: 7px; }
-    .btn-gpkg:hover { background: #1f7046; }
-    .btn-shp  { background: var(--border); color: var(--accent); }
-    .btn-shp:hover  { background: #243a55; }
+    /* Stat cards */
+    .stat-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:8px; }
+    .stat-card { background:#0b1d2e; border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+    .stat-card .lbl { font-size:10px; color:var(--muted2); }
+    .stat-card .val { font-size:18px; font-weight:700; color:var(--accent); margin-top:1px; }
 
-    .btn-row { display: flex; gap: 8px; }
-    .btn-row .btn { flex: 1; }
+    /* Toggle rows */
+    .toggle-row { display:flex; align-items:center; gap:7px; padding:5px 0; cursor:pointer;
+                  font-size:12px; color:var(--text); border-bottom:1px solid #111e2c; }
+    .toggle-row:last-child { border-bottom:none; }
+    .toggle-row input[type=checkbox] { accent-color:var(--accent); cursor:pointer; width:13px; height:13px; }
+    .color-swatch { width:20px; height:4px; border-radius:3px; flex-shrink:0; }
+    .toggle-indent { padding-left:16px; }
+    #order-toggles { padding-top:4px; }
 
-    /* Status */
-    #status-box {
-      background: #08121c;
-      border-radius: 5px;
-      padding: 8px 10px;
-      font-size: 11px;
-      color: var(--muted);
-      min-height: 34px;
-      font-family: monospace;
-      line-height: 1.5;
-      border: 1px solid var(--border);
-      margin-top: 10px;
-    }
-    #status-box.ok    { color: var(--success); }
-    #status-box.error { color: var(--error); }
-    #status-box.warn  { color: var(--warn); }
+    /* Outlet list */
+    .outlet-item { display:flex; align-items:center; gap:8px; padding:7px 0;
+                   border-bottom:1px solid #111e2c; font-size:12px; }
+    .outlet-item:last-child { border-bottom:none; }
+    .outlet-dot { width:12px; height:12px; border-radius:50%; flex-shrink:0; border:2px solid rgba(255,255,255,.4); }
+    .outlet-info { flex:1; }
+    .outlet-info .coords { font-size:10px; color:var(--muted); font-family:monospace; }
+    .outlet-info .stats  { font-size:11px; color:var(--accent); margin-top:1px; }
+    .outlet-remove { background:none; border:none; color:var(--error); cursor:pointer;
+                     font-size:16px; line-height:1; padding:0 2px; opacity:.7; }
+    .outlet-remove:hover { opacity:1; }
+    #outlet-list-empty { font-size:11px; color:var(--muted); padding:6px 0; }
 
-    /* Stats */
-    .stat-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-      margin-bottom: 12px;
-    }
-    .stat-card {
-      background: #0b1d2e;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px 10px;
-    }
-    .stat-card .lbl { font-size: 10px; color: var(--muted2); }
-    .stat-card .val { font-size: 18px; font-weight: 700; color: var(--accent); margin-top: 1px; }
-
-    /* Layer toggles */
-    .toggle-row {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 5px 0;
-      cursor: pointer;
-      font-size: 12px;
-      color: var(--text);
-      border-bottom: 1px solid #111e2c;
-    }
-    .toggle-row:last-child { border-bottom: none; }
-    .toggle-row input[type=checkbox] { accent-color: var(--accent); cursor: pointer; width: 13px; height: 13px; }
-    .color-swatch {
-      width: 20px; height: 4px;
-      border-radius: 3px;
-      flex-shrink: 0;
-    }
-    .toggle-indent { padding-left: 16px; }
-
-    #order-toggles { padding-top: 4px; }
-    .order-header {
-      font-size: 10px;
-      color: var(--muted2);
-      margin: 8px 0 4px;
-      font-style: italic;
-    }
-
-    /* ── Map ─────────────────────────────────────────── */
-    #map { flex: 1; cursor: crosshair; }
-    #map.wait { cursor: wait; }
+    /* Map */
+    #map { flex:1; cursor:crosshair; }
+    #map.wait { cursor:wait; }
 
     /* Loading overlay */
-    #loader {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(8,15,22,.65);
-      z-index: 9999;
-      align-items: center;
-      justify-content: center;
-      flex-direction: column;
-      gap: 14px;
-    }
-    #loader.on { display: flex; }
-    .spinner {
-      width: 46px; height: 46px;
-      border: 4px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin .7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #loader p { color: var(--accent); font-size: 13px; }
+    #loader { display:none; position:fixed; inset:0; background:rgba(8,15,22,.65); z-index:9999;
+              align-items:center; justify-content:center; flex-direction:column; gap:14px; }
+    #loader.on { display:flex; }
+    .spinner { width:46px; height:46px; border:4px solid var(--border); border-top-color:var(--accent);
+               border-radius:50%; animation:spin .7s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    #loader-text { color:var(--accent); font-size:13px; }
+    #loader-detail { color:var(--muted); font-size:11px; font-family:monospace; max-width:320px; text-align:center; }
 
-    /* Map legend (bottom-right) */
-    #map-legend {
-      display: none;
-      position: absolute;
-      bottom: 30px; right: 10px;
-      z-index: 800;
-      background: rgba(13,26,39,.88);
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      padding: 10px 12px;
-      font-size: 11px;
-      color: var(--text);
-      min-width: 130px;
-      pointer-events: none;
-    }
-    #map-legend h4 { font-size: 10px; color: var(--muted2); margin-bottom: 7px; text-transform: uppercase; letter-spacing: .8px; }
-    .leg-row { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
-    .leg-row:last-child { margin-bottom: 0; }
+    /* Map legend */
+    #map-legend { display:none; position:absolute; bottom:30px; right:10px; z-index:800;
+                  background:rgba(13,26,39,.88); border:1px solid var(--border); border-radius:7px;
+                  padding:10px 12px; font-size:11px; color:var(--text); min-width:130px; pointer-events:none; }
+    #map-legend h4 { font-size:10px; color:var(--muted2); margin-bottom:7px;
+                     text-transform:uppercase; letter-spacing:.8px; }
+    .leg-row { display:flex; align-items:center; gap:7px; margin-bottom:5px; }
+    .leg-row:last-child { margin-bottom:0; }
 
-    /* ── Tabs ────────────────────────────────────────── */
-    .tab-bar {
-      display: flex;
-      background: var(--panel2);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .tab-btn {
-      flex: 1;
-      padding: 9px 6px;
-      background: none;
-      border: none;
-      border-bottom: 2px solid transparent;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 600;
-      letter-spacing: .4px;
-      text-transform: uppercase;
-      cursor: pointer;
-      transition: color .15s, border-color .15s;
-    }
-    .tab-btn.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
-    }
-    .tab-btn:hover:not(.active) { color: var(--text); }
-    .tab-pane { display: none; }
-    .tab-pane.active { display: block; }
+    /* Geocoder */
+    .leaflet-control-geocoder { background:var(--panel) !important; border:1px solid var(--border) !important;
+                                 border-radius:6px !important; box-shadow:0 2px 8px rgba(0,0,0,.4) !important; }
+    .leaflet-control-geocoder-form input { background:var(--panel2) !important; color:var(--text) !important;
+                                           border:none !important; font-size:12px !important;
+                                           padding:6px 8px !important; width:220px !important; border-radius:4px !important; }
+    .leaflet-control-geocoder-form input::placeholder { color:var(--muted) !important; }
+    .leaflet-control-geocoder-alternatives { background:var(--panel) !important;
+                                             border:1px solid var(--border) !important; border-radius:0 0 6px 6px !important; }
+    .leaflet-control-geocoder-alternatives li a { color:var(--text) !important; font-size:11px !important; padding:6px 10px !important; }
+    .leaflet-control-geocoder-alternatives li a:hover { background:var(--panel2) !important; }
+    .leaflet-control-geocoder-icon { background-color:var(--panel) !important; color:var(--accent) !important; }
 
-    /* ── Documentation styles ────────────────────────── */
-    #docs-pane {
-      padding: 0;
-      overflow-y: auto;
-      flex: 1;
-    }
-    .doc-section {
-      border-bottom: 1px solid var(--border);
-    }
-    .doc-toggle {
-      width: 100%;
-      background: none;
-      border: none;
-      padding: 12px 16px;
-      text-align: left;
-      cursor: pointer;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      color: var(--text);
-      font-size: 12px;
-      font-weight: 600;
-    }
-    .doc-toggle:hover { background: #0d1a27; }
-    .doc-toggle .arrow {
-      color: var(--muted2);
-      font-size: 10px;
-      transition: transform .2s;
-    }
-    .doc-toggle.open .arrow { transform: rotate(90deg); }
-    .doc-body {
-      display: none;
-      padding: 4px 16px 14px;
-      font-size: 11.5px;
-      line-height: 1.65;
-      color: #b0c0d0;
-    }
-    .doc-body.open { display: block; }
-    .doc-body h4 {
-      font-size: 11px;
-      color: var(--accent);
-      font-weight: 700;
-      margin: 10px 0 5px;
-      letter-spacing: .3px;
-      text-transform: uppercase;
-    }
-    .doc-body p  { margin-bottom: 8px; }
-    .doc-body p:last-child { margin-bottom: 0; }
-    .doc-body ul { padding-left: 14px; margin-bottom: 8px; }
-    .doc-body li { margin-bottom: 4px; }
-    .doc-body code {
-      background: #0a1520;
-      border: 1px solid var(--border);
-      border-radius: 3px;
-      padding: 1px 5px;
-      font-family: monospace;
-      font-size: 10.5px;
-      color: #90d0e8;
-    }
-    .doc-body strong { color: var(--text); font-weight: 600; }
-    .doc-body em { color: var(--warn); font-style: normal; }
+    /* Tab bar */
+    #tab-bar { display:flex; border-bottom:1px solid var(--border); flex-shrink:0; }
+    .tab-btn { flex:1; padding:9px 0; background:transparent; border:none; border-bottom:2px solid transparent;
+               color:var(--muted); font-size:12px; font-weight:600; cursor:pointer; transition:color .15s,border-color .15s; }
+    .tab-btn:hover  { color:var(--text); }
+    .tab-btn.active { color:var(--accent); border-bottom-color:var(--accent); }
 
-    /* Parameter reference table */
-    .param-table { width: 100%; border-collapse: collapse; margin: 6px 0; }
-    .param-table th {
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: .5px;
-      color: var(--muted2);
-      padding: 4px 6px;
-      text-align: left;
-      border-bottom: 1px solid var(--border);
-    }
-    .param-table td {
-      padding: 5px 6px;
-      font-size: 11px;
-      border-bottom: 1px solid #111e2c;
-      vertical-align: top;
-    }
-    .param-table td:first-child { color: var(--accent); font-weight: 600; white-space: nowrap; }
+    /* Methodology section */
+    .method-section { padding:14px 16px; border-bottom:1px solid var(--border); }
+    .method-toggle { display:flex; align-items:center; justify-content:space-between;
+                     cursor:pointer; user-select:none; }
+    .method-toggle:hover .sec-title { color:var(--accent); }
+    .method-caret { font-size:10px; color:var(--muted2); transition:transform .2s; }
+    .method-body { margin-top:10px; display:none; }
+    .method-body.open { display:block; }
+    .method-step { margin-bottom:12px; }
+    .method-step-title { font-size:11px; font-weight:700; color:var(--accent2); margin-bottom:4px; }
+    .method-step p { font-size:11px; color:var(--muted); line-height:1.6; }
+    .method-step code { font-size:10px; background:#0b1d2e; border:1px solid var(--border);
+                        border-radius:3px; padding:1px 5px; color:#a8d8ea; font-family:monospace; }
+    .method-step ul { margin:4px 0 0 14px; }
+    .method-step ul li { font-size:11px; color:var(--muted); line-height:1.6; margin-bottom:5px; }
+    .method-step ul li em { color:var(--text); font-style:italic; }
 
-    /* Pipeline step */
-    .pipeline-step {
-      display: flex;
-      gap: 10px;
-      margin-bottom: 10px;
-    }
-    .step-num {
-      width: 22px; height: 22px;
-      border-radius: 50%;
-      background: #1a3d5c;
-      border: 1px solid var(--accent);
-      color: var(--accent);
-      font-size: 10px;
-      font-weight: 700;
-      display: flex; align-items: center; justify-content: center;
-      flex-shrink: 0;
-    }
-    .step-body { flex: 1; }
-    .step-title { font-weight: 700; color: var(--text); font-size: 12px; margin-bottom: 2px; }
-    .step-desc  { font-size: 11px; color: #8aa5bc; line-height: 1.5; }
-
-    /* Quality badge */
-    .badge {
-      display: inline-block;
-      font-size: 9px;
-      font-weight: 700;
-      letter-spacing: .4px;
-      text-transform: uppercase;
-      padding: 1px 5px;
-      border-radius: 3px;
-      margin-left: 4px;
-    }
-    .badge-blue  { background: #1a3d5c; color: var(--accent); }
-    .badge-green { background: #1a3d2a; color: var(--success); }
-    .badge-warn  { background: #3d2a0a; color: var(--warn); }
-
-    /* Geocoder search bar */
-    .leaflet-control-geocoder {
-      background: var(--panel) !important;
-      border: 1px solid var(--border) !important;
-      border-radius: 6px !important;
-      box-shadow: 0 2px 8px rgba(0,0,0,.4) !important;
-    }
-    .leaflet-control-geocoder-form input {
-      background: var(--panel2) !important;
-      color: var(--text) !important;
-      border: none !important;
-      font-size: 12px !important;
-      padding: 6px 8px !important;
-      width: 220px !important;
-      border-radius: 4px !important;
-    }
-    .leaflet-control-geocoder-form input::placeholder { color: var(--muted) !important; }
-    .leaflet-control-geocoder-alternatives {
-      background: var(--panel) !important;
-      border: 1px solid var(--border) !important;
-      border-radius: 0 0 6px 6px !important;
-    }
-    .leaflet-control-geocoder-alternatives li a {
-      color: var(--text) !important;
-      font-size: 11px !important;
-      padding: 6px 10px !important;
-    }
-    .leaflet-control-geocoder-alternatives li a:hover { background: var(--panel2) !important; }
-    .leaflet-control-geocoder-icon {
-      background-color: var(--panel) !important;
-      color: var(--accent) !important;
-    }
-
-    /* Cursor coordinates */
-    #coords-display {
-      position: fixed;
-      bottom: 10px;
-      left: 330px;
-      z-index: 99999;
-      background: rgba(13,26,39,.88);
-      border: 1px solid #1e3045;
-      border-radius: 4px;
-      padding: 4px 10px;
-      font-size: 11px;
-      font-family: monospace;
-      color: #7ec8e3;
-      pointer-events: none;
-      letter-spacing: .4px;
-      white-space: nowrap;
-    }
+    /* Cursor coords */
+    #coords-display { position:fixed; bottom:10px; left:330px; z-index:99999;
+                      background:rgba(13,26,39,.88); border:1px solid #1e3045; border-radius:4px;
+                      padding:4px 10px; font-size:11px; font-family:monospace; color:#7ec8e3;
+                      pointer-events:none; letter-spacing:.4px; white-space:nowrap; }
 
     /* Leaflet overrides */
-    .leaflet-control-zoom a {
-      background: var(--panel) !important;
-      color: var(--accent) !important;
-      border-color: var(--border) !important;
-    }
-    .leaflet-bar { border-color: var(--border) !important; box-shadow: none !important; }
-    .leaflet-popup-content-wrapper {
-      background: var(--panel2);
-      color: var(--text);
-      border: 1px solid var(--border);
-      box-shadow: 0 4px 16px rgba(0,0,0,.5);
-      border-radius: 6px;
-    }
-    .leaflet-popup-tip { background: var(--panel2); }
+    .leaflet-control-zoom a { background:var(--panel) !important; color:var(--accent) !important; border-color:var(--border) !important; }
+    .leaflet-bar { border-color:var(--border) !important; box-shadow:none !important; }
+    .leaflet-popup-content-wrapper { background:var(--panel2); color:var(--text);
+                                     border:1px solid var(--border); box-shadow:0 4px 16px rgba(0,0,0,.5); border-radius:6px; }
+    .leaflet-popup-tip { background:var(--panel2); }
   </style>
 </head>
 <body>
@@ -562,89 +200,52 @@
 <div id="sidebar">
   <div class="s-head">
     <h1>&#9096; Catchment Delineation</h1>
-    <p>DEM-based hydrological analysis tool</p>
   </div>
 
   <!-- Tab bar -->
-  <div class="tab-bar">
-    <button class="tab-btn active" onclick="switchTab('analysis')">&#9654; Analysis</button>
-    <button class="tab-btn" onclick="switchTab('docs')">&#128196; Methodology</button>
+  <div id="tab-bar">
+    <button id="btn-tab-analysis" class="tab-btn active" onclick="switchTab('analysis')">Analysis</button>
+    <button id="btn-tab-method"   class="tab-btn"        onclick="switchTab('method')">Methodology</button>
   </div>
 
-  <!-- ── ANALYSIS TAB ─────────────────────────────── -->
-  <div id="tab-analysis" class="tab-pane active">
+  <div id="tab-analysis">
 
-  <!-- Step 1: Set download area -->
+  <!-- Step 1: Draw polygon -->
   <div class="section">
-    <div class="sec-title">Step 1 — Set download area</div>
+    <div class="sec-title">Step 1 — Draw study area</div>
     <div class="instruction-pill">
       <div class="pulse-dot"></div>
-      <span id="instruction-text">Click anywhere on the map to centre the download area.</span>
+      <span id="instruction-text">Use the polygon/rectangle tool (top-left of map) to draw your study area.</span>
+    </div>
+    <div id="polygon-info" style="display:none; margin-top:8px; font-size:11px; color:var(--muted);">
+      <span id="polygon-bbox-text"></span>
     </div>
   </div>
 
   <!-- Step 2: Download DEM -->
   <div class="section">
-    <div class="sec-title">Step 2 — Download terrain</div>
-
-    <!-- Coverage radius -->
-    <div class="param-block">
-      <div class="param-header">
-        <span class="param-name">
-          Coverage Radius
-          <span class="help-icon">?
-            <span class="tooltip-box">
-              <strong>What it is:</strong> The radius (km) of the DEM downloaded around your point from AWS Terrain Tiles (no API key needed).<br><br>
-              <strong>Effect:</strong> Larger = captures bigger catchments but slower download. If the catchment boundary reaches the DEM edge, increase this and re-download.<br><br>
-              <strong>Tip:</strong> 20 km for small basins; 50–100 km for large river systems.
-            </span>
-          </span>
-        </span>
-        <span class="param-val" id="radius-val">2</span><span style="color:var(--muted);font-size:11px;">km</span>
-      </div>
-      <input type="range" id="radius-slider" min="1" max="5" value="2" step="1"/>
-      <div class="range-labels"><span>1 km</span><span>5 km</span></div>
-      <div id="radius-effect" class="param-effect">→ ~2 km radius DEM download</div>
-    </div>
-
+    <div class="sec-title">Step 2 — Download &amp; process terrain</div>
     <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
-      &#8659;&nbsp; Download DEM
+      &#8659;&nbsp; Download SRTM DEM
     </button>
-
-    <!-- DEM info card (shown after download) -->
     <div id="dem-info" style="display:none; margin-top:10px;">
       <div class="stat-grid">
-        <div class="stat-card">
-          <div class="lbl">Resolution</div>
-          <div class="val" id="dem-res-val" style="font-size:14px;">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="lbl">DEM status</div>
-          <div class="val" style="font-size:13px; color:var(--success);">&#10003; Loaded</div>
-        </div>
-      </div>
-      <div style="font-size:10px;color:var(--muted2);margin-top:4px;">
-        Re-click the map to adjust your outlet on the terrain, then run.
+        <div class="stat-card"><div class="lbl">Resolution</div><div class="val" id="dem-res-val" style="font-size:14px;">—</div></div>
+        <div class="stat-card"><div class="lbl">DEM status</div><div class="val" style="font-size:13px;color:var(--success);">&#10003; Loaded</div></div>
       </div>
     </div>
   </div>
 
-  <!-- Step 3: Analysis parameters -->
-  <div class="section">
-    <div class="sec-title">Step 3 — Analysis parameters</div>
-
-    <!-- Accumulation threshold -->
+  <!-- Step 3: Accumulation threshold -->
+  <div class="section" id="params-section" style="display:none;">
+    <div class="sec-title">Step 3 — Stream parameters</div>
     <div class="param-block">
       <div class="param-header">
-        <span class="param-name">
-          Accumulation Threshold
-          <span class="help-icon">?
-            <span class="tooltip-box">
-              <strong>What it is:</strong> The minimum number of upstream cells that must drain through a point for it to be classified as a stream.<br><br>
-              <strong>Effect:</strong> Lower values → more streams, finer network, smaller subbasins. Higher values → only major rivers appear.<br><br>
-              <strong>Typical range:</strong> 200–2000 for this DEM.
-            </span>
-          </span>
+        <span class="param-name">Accumulation Threshold
+          <span class="help-icon">?<span class="tooltip-box">
+            <strong>What it is:</strong> Minimum upstream cells for a pixel to be a stream.<br><br>
+            <strong>Effect:</strong> Lower = more streams (denser network). Higher = main rivers only.
+          </span></span>
         </span>
         <span class="param-val" id="acc-val">500</span>
       </div>
@@ -652,114 +253,55 @@
       <div class="range-labels"><span>50 (dense)</span><span>5000 (sparse)</span></div>
       <div id="acc-effect" class="param-effect">→ Moderate stream network</div>
     </div>
-
-    <!-- Min Strahler order -->
-    <div class="param-block">
-      <div class="param-header">
-        <span class="param-name">
-          Min Strahler Order
-          <span class="help-icon">?
-            <span class="tooltip-box">
-              <strong>What it is:</strong> Strahler order is a measure of stream importance. Headwater streams = order 1. When two streams of the same order meet, the downstream segment gets order+1.<br><br>
-              <strong>Effect:</strong> Only confluences at or above this order create subbasin boundaries. Higher = fewer, larger subbasins.<br><br>
-              <strong>Tip:</strong> Order 2 = divide at major tributaries; order 3 = only main river junctions.
-            </span>
-          </span>
-        </span>
-        <span class="param-val" id="ord-val">2</span>
-      </div>
-      <input type="range" id="ord-slider" min="1" max="6" value="2" step="1"/>
-      <div class="range-labels"><span>1 (many basins)</span><span>6 (few)</span></div>
-      <div id="ord-effect" class="param-effect">→ Subbasins at major tributaries</div>
-    </div>
-
-    <!-- Min basin size -->
-    <div class="param-block">
-      <div class="param-header">
-        <span class="param-name">
-          Min Basin Size
-          <span class="help-icon">?
-            <span class="tooltip-box">
-              <strong>What it is:</strong> Minimum subbasin area as a percentage of the total catchment area.<br><br>
-              <strong>Effect:</strong> Filters out tiny subbasins that are likely artifacts of DEM resolution. Increase this to simplify the output.<br><br>
-              <strong>Tip:</strong> Start at 2–5%. If you see many tiny fragments, increase to 10%.
-            </span>
-          </span>
-        </span>
-        <span class="param-val" id="basin-val">2</span><span style="color:var(--muted);font-size:11px;">%</span>
-      </div>
-      <input type="range" id="basin-slider" min="1" max="25" value="2" step="1"/>
-      <div class="range-labels"><span>1% (detailed)</span><span>25% (simplified)</span></div>
-      <div id="basin-effect" class="param-effect">→ Include basins ≥ 2% of catchment</div>
-    </div>
   </div>
 
-  <!-- Step 4: Run / Reset -->
-  <div class="section">
-    <div class="sec-title">Step 4 — Run</div>
-    <div class="btn-row">
-      <button id="run-btn" class="btn btn-run" disabled onclick="runDelineation()">
-        &#9654; Run Analysis
-      </button>
-      <button class="btn btn-reset" onclick="resetAll()" title="Clear all results and start over">
-        &#8635; Reset
-      </button>
-    </div>
-    <div id="status-box">Click the map to place an outlet point.</div>
-  </div>
-
-  <!-- Results -->
-  <div class="section" id="results-section" style="display:none;">
-    <div class="sec-title">Results</div>
-    <div class="stat-grid">
-      <div class="stat-card">
-        <div class="lbl">Catchment cells</div>
-        <div class="val" id="stat-cells">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="lbl">Subbasins</div>
-        <div class="val" id="stat-basins">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="lbl">River segments</div>
-        <div class="val" id="stat-rivers">—</div>
-      </div>
-      <div class="stat-card">
-        <div class="lbl">Max Strahler</div>
-        <div class="val" id="stat-order">—</div>
-      </div>
-    </div>
-
-    <!-- Layer toggles -->
-    <div class="sec-title" style="margin-top:4px;">Layers</div>
-
+  <!-- Raster layers (acc + fdir) — shown after DEM loaded -->
+  <div class="section" id="raster-section" style="display:none;">
+    <div class="sec-title">Raster layers</div>
     <label class="toggle-row">
-      <input type="checkbox" id="tog-dem" checked onchange="toggleLayer('dem')"/>
+      <input type="checkbox" id="tog-dem" checked onchange="toggleRasterLayer('dem')"/>
       <span class="color-swatch" style="background:linear-gradient(90deg,#6a8f5a,#c4a96b,#e8e0c0);"></span>
-      DEM terrain overlay
+      DEM terrain (hillshade)
     </label>
     <label class="toggle-row">
-      <input type="checkbox" id="tog-catchment" checked onchange="toggleLayer('catchment')"/>
-      <span class="color-swatch" style="background:#3b9fd1;"></span>
-      Catchment boundary
+      <input type="checkbox" id="tog-acc" onchange="toggleRasterLayer('acc')"/>
+      <span class="color-swatch" style="background:linear-gradient(90deg,#e8f4fc,#3399cc,#002255);"></span>
+      Flow accumulation (log scale)
     </label>
     <label class="toggle-row">
-      <input type="checkbox" id="tog-subbasins" checked onchange="toggleLayer('subbasins')"/>
-      <span class="color-swatch" style="background:linear-gradient(90deg,#4e9fd4,#6ec9a3,#e8a55a);"></span>
-      Subbasins
+      <input type="checkbox" id="tog-fdir" onchange="toggleRasterLayer('fdir')"/>
+      <span class="color-swatch" style="background:linear-gradient(90deg,#f44336,#ff9800,#4caf50,#2196f3,#9c27b0);"></span>
+      Flow direction (D8, colour = direction)
     </label>
-
   </div>
 
-  <!-- River layer toggles (shown as soon as rivers are extracted) -->
+  <!-- River layers -->
   <div class="section" id="river-section" style="display:none;">
     <div class="sec-title" style="margin-bottom:6px;">River layers</div>
-    <div class="toggle-row" style="cursor:default; display:flex; justify-content:space-between; align-items:center; border-bottom:none; padding-bottom:0;">
-      <span style="color:var(--muted2);font-size:11px;">Toggle by Strahler order</span>
-      <span style="font-size:10px;color:var(--muted2);cursor:pointer;" onclick="toggleAllOrders(true)">all</span>
-      <span style="font-size:10px;color:var(--muted2);margin-left:4px;cursor:pointer;" onclick="toggleAllOrders(false)">none</span>
-    </div>
+    <!-- Master toggle -->
+    <label class="toggle-row" style="padding-bottom:7px; border-bottom:1px solid var(--border); margin-bottom:4px;">
+      <input type="checkbox" id="tog-river-all" checked onchange="toggleAllOrders(this.checked)"/>
+      <span class="color-swatch" style="background:linear-gradient(90deg,#aaccff,#3399cc,#0055aa);"></span>
+      River network
+    </label>
+    <!-- Sub-layers by Strahler order -->
     <div id="order-toggles" class="toggle-indent"></div>
+  </div>
+
+  <!-- Step 4: Outlets -->
+  <div class="section" id="outlets-section" style="display:none;">
+    <div class="sec-title">Step 4 — Place outlet(s) &amp; delineate</div>
+    <div class="instruction-pill" style="margin-bottom:10px;">
+      <div class="pulse-dot"></div>
+      <span>Click on any stream on the map. Each click snaps to the stream and immediately delineates the upstream catchment.</span>
+    </div>
+    <div id="outlet-list">
+      <div id="outlet-list-empty">No outlets placed yet.</div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button class="btn btn-danger btn-sm" onclick="clearAllOutlets()" style="flex:1;">&#8635; Clear All</button>
+    </div>
+    <div id="status-box">Ready — click on a stream to place an outlet.</div>
   </div>
 
   <!-- Export -->
@@ -775,699 +317,451 @@
 
   </div><!-- end #tab-analysis -->
 
-  <!-- ── DOCS TAB ────────────────────────────────────── -->
-  <div id="tab-docs" class="tab-pane" style="flex:1;overflow-y:auto;">
+  <!-- Methodology tab pane -->
+  <div id="tab-method" style="display:none; overflow-y:auto; flex:1;">
+  <div class="method-section" style="border-bottom:none;">
+    <div class="method-body open" id="method-body">
 
-    <!-- Overview -->
-    <div class="doc-section">
-      <button class="doc-toggle open" onclick="toggleDoc(this)">
-        Overview &amp; Purpose <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body open">
-        <p>This tool performs <strong>automated watershed delineation</strong> from a Digital Elevation Model (DEM). It implements a standard hydrological processing chain — from raw elevation data to a fully attributed drainage network and subbasin map — entirely within the browser.</p>
-        <p>Designed for <strong>hydrologists, catchment modellers, and flood risk analysts</strong>, it supports rapid basin characterisation without requiring GIS desktop software.</p>
-        <h4>Primary outputs</h4>
-        <ul>
-          <li><strong>Catchment boundary</strong> — the total drainage area contributing to your chosen outlet</li>
-          <li><strong>River network</strong> — extracted stream lines attributed with Strahler order and flow accumulation</li>
-          <li><strong>Subbasins</strong> — nested drainage units defined by major tributary confluences</li>
-        </ul>
-        <p>All results are exportable as <strong>GeoPackage</strong> (for QGIS) or <strong>Shapefile</strong>.</p>
+      <div class="method-step">
+        <div class="method-step-title">1 · DEM Acquisition</div>
+        <p>SRTM GL1 (30 m) tiles are downloaded from the <strong>OpenTopography API</strong> and clipped to the drawn polygon. If the API key is rate-limited (50 calls / 24 h), the tool falls back automatically to <strong>AWS Terrain Tiles</strong> (~76 m/px, no API key required). The raster is cropped with <code>rasterio.mask(crop=True)</code> so only cells inside the polygon are retained.</p>
       </div>
-    </div>
 
-    <!-- Pipeline -->
-    <div class="doc-section">
-      <button class="doc-toggle" onclick="toggleDoc(this)">
-        Processing Pipeline <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body">
-        <div class="pipeline-step">
-          <div class="step-num">1</div>
-          <div class="step-body">
-            <div class="step-title">DEM Conditioning <span class="badge badge-blue">pysheds</span></div>
-            <div class="step-desc">Raw DEMs contain <strong>artefact sinks</strong> — cells lower than all neighbours due to interpolation errors or data voids. These break flow routing by creating closed loops. Three conditioning steps are applied in sequence:
-              <ul style="margin-top:5px;">
-                <li><strong>Pit filling</strong> — raises isolated single-cell sinks to the level of their lowest neighbour, enabling flow to escape.</li>
-                <li><strong>Depression filling</strong> (Wang &amp; Liu 2006) — floods closed multi-cell depressions to their spill point, ensuring all flow eventually reaches the domain boundary.</li>
-                <li><strong>Flat resolution</strong> (Barnes et al. 2014) — adds a tiny epsilon gradient across flat areas (e.g. filled lake beds) so D8 routing produces a unique downstream direction rather than stalling.</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">2</div>
-          <div class="step-body">
-            <div class="step-title">D8 Flow Direction</div>
-            <div class="step-desc">Each conditioned cell is assigned to drain to the <strong>steepest of its 8 neighbours</strong> (O'Callaghan &amp; Mark 1984). Direction is encoded as a power-of-2 integer (64=N, 128=NE, 1=E … 32=NW). This produces a single-flow-direction raster that defines the drainage network topology.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">3</div>
-          <div class="step-body">
-            <div class="step-title">Flow Accumulation</div>
-            <div class="step-desc">For every cell, counts the total number of upstream cells that drain through it. High-accumulation cells correspond to rivers and valley bottoms. The <strong>maximum value equals the total number of DEM cells</strong> and occurs at the main outlet of the domain.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">4</div>
-          <div class="step-body">
-            <div class="step-title">Outlet Snapping</div>
-            <div class="step-desc">When you click on the map, the tool automatically snaps to the <strong>highest-accumulation cell within a 15-pixel search radius</strong> that exceeds the accumulation threshold. This corrects for clicks that miss the stream centreline and ensures the delineation captures the correct drainage area.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">5</div>
-          <div class="step-body">
-            <div class="step-title">Catchment Delineation <span class="badge badge-green">BFS</span></div>
-            <div class="step-desc">A <strong>breadth-first search (BFS)</strong> traces all cells whose D8 flow path leads to the snapped outlet. For each cell in the queue, all 8 neighbours are tested — if a neighbour's flow direction points toward the current cell, it is added to the catchment. This is more reliable than pysheds' native <code>grid.catchment()</code> which can fail for boundary outlets.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">6</div>
-          <div class="step-body">
-            <div class="step-title">Stream Extraction</div>
-            <div class="step-desc">Cells within the catchment where flow accumulation exceeds the <strong>Accumulation Threshold</strong> are classified as stream cells. The threshold controls the channel initiation area — the minimum drainage area required to sustain a permanent channel.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">7</div>
-          <div class="step-body">
-            <div class="step-title">Strahler Stream Order</div>
-            <div class="step-desc">Stream cells are ordered using <strong>Strahler's classification</strong> (1957). Cells are processed in order of increasing accumulation (headwaters first):
-              <ul style="margin-top:5px;">
-                <li>Headwater cells (no upstream stream neighbours) → <strong>Order 1</strong></li>
-                <li>Confluence of two order-<em>n</em> streams → <strong>Order n+1</strong></li>
-                <li>Confluence where orders differ → <strong>Order = max</strong> of tributaries</li>
-              </ul>
-            </div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">8</div>
-          <div class="step-body">
-            <div class="step-title">River Network Vectorisation</div>
-            <div class="step-desc">The stream raster is converted to a <strong>topologically connected polyline network</strong>. Network nodes (headwaters, confluences, outlet) are identified. One polyline segment is traced downstream from each node to the next node, so all segments <em>share exact endpoints</em> — forming a valid connected network for GIS analysis and routing.</div>
-          </div>
-        </div>
-        <div class="pipeline-step">
-          <div class="step-num">9</div>
-          <div class="step-body">
-            <div class="step-title">Subbasin Delineation</div>
-            <div class="step-desc">Pour points are placed at confluences where the Strahler order increases and both tributaries meet the <strong>Min Strahler Order</strong> threshold. BFS upstream traces are run from each pour point, processed <em>upstream-first</em> (sorted by accumulation) to prevent overlap. Any residual unassigned cells within the catchment are assigned to the nearest subbasin using a <strong>Euclidean distance transform</strong>.</div>
-          </div>
-        </div>
+      <div class="method-step">
+        <div class="method-step-title">2 · DEM Conditioning — Walled DEM</div>
+        <p>NODATA cells outside the polygon boundary are replaced with <code>max_elev + 5000 m</code> before flow routing. This "wall" prevents pysheds from routing flow through masked areas and keeps all analysis strictly inside the drawn polygon. After routing, <code>fdir</code> and <code>acc</code> are zeroed outside the valid mask as a second safeguard.</p>
       </div>
-    </div>
 
-    <!-- Parameter reference -->
-    <div class="doc-section">
-      <button class="doc-toggle" onclick="toggleDoc(this)">
-        Parameter Reference <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body">
-
-        <h4>Accumulation Threshold</h4>
-        <p>The <strong>channel initiation threshold</strong> — the minimum number of upstream cells required for a cell to be classified as a stream. Conceptually equivalent to the minimum contributing area (km²) needed to initiate and sustain a channel.</p>
-        <table class="param-table">
-          <tr><th>Value</th><th>Typical interpretation</th></tr>
-          <tr><td>50–200</td><td>Dense network including ephemeral &amp; intermittent channels. Use for detailed hillslope analysis.</td></tr>
-          <tr><td>200–1000</td><td>Perennial stream network. Good starting point for catchment modelling.</td></tr>
-          <tr><td>1000–5000</td><td>Major rivers and main tributaries only. Use for large-scale basin studies.</td></tr>
-        </table>
-        <p><em>Tip:</em> For a 30m DEM, 500 cells ≈ 0.45 km² contributing area. For a 10m DEM, 500 cells ≈ 0.05 km². Always validate extracted channels against OS/EA river layers.</p>
-
-        <h4>Min Strahler Order (subbasin splits)</h4>
-        <p>Controls which confluences become <strong>subbasin pour points</strong>. Only junctions where both incoming tributaries have Strahler order ≥ this value will create a subbasin boundary.</p>
-        <table class="param-table">
-          <tr><th>Value</th><th>Effect</th></tr>
-          <tr><td>1</td><td>Every headwater confluence creates a subbasin. Can produce dozens of tiny basins.</td></tr>
-          <tr><td>2</td><td>Only splits at junctions of proper tributaries. <strong>Recommended default.</strong></td></tr>
-          <tr><td>3</td><td>Splits only at major tributary junctions — fewer, larger subbasins.</td></tr>
-          <tr><td>4+</td><td>Only the highest-order confluences. Suitable for large catchments with high-order streams.</td></tr>
-        </table>
-        <p><em>Tip:</em> Start at 2 and increase if you get too many subbasins. The Max Strahler shown in results indicates what values are meaningful for your catchment.</p>
-
-        <h4>Min Basin Size (% of catchment)</h4>
-        <p>A <strong>minimum area filter</strong> that removes subbasins smaller than this percentage of the total catchment. Small basins typically arise from:</p>
+      <div class="method-step">
+        <div class="method-step-title">3 · Flow Routing (D8)</div>
+        <p>The conditioned DEM is processed with <strong>pysheds</strong> using the D8 (eight-direction) method:</p>
         <ul>
-          <li>Short stream segments between closely-spaced confluences</li>
-          <li>DEM artefacts that create false bifurcations</li>
-          <li>Genuine small tributary catchments (if you want these, lower the value)</li>
+          <li>Pit filling (<code>fill_pits</code>)</li>
+          <li>Depression filling (<code>fill_depressions</code>)</li>
+          <li>Flat resolution (<code>resolve_flats</code>)</li>
+          <li>Flow direction (<code>flowdir</code>) — 8 cardinal/diagonal directions encoded as 1, 2, 4, 8, 16, 32, 64, 128</li>
+          <li>Flow accumulation (<code>accumulation</code>) — number of upstream contributing cells</li>
         </ul>
-        <p><em>Tip:</em> 2–5% is a good balance. If you see many thin slivers, increase to 10%. If you need fine-scale basin characterisation, drop to 1%.</p>
       </div>
-    </div>
 
-    <!-- Interpreting results -->
-    <div class="doc-section">
-      <button class="doc-toggle" onclick="toggleDoc(this)">
-        Interpreting Results <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body">
-        <h4>Catchment Boundary</h4>
-        <p>The dashed blue outline shows the <strong>total drainage area</strong> contributing to your outlet. Every cell inside will eventually route flow to the outlet under the D8 model. This boundary is a fundamental unit for:</p>
-        <ul>
-          <li>Rainfall-runoff modelling (e.g. HEC-HMS, SWMM)</li>
-          <li>Flood frequency analysis</li>
-          <li>Water resource accounting</li>
-          <li>Pollutant source attribution</li>
-        </ul>
-
-        <h4>River Network &amp; Strahler Order</h4>
-        <p>Streams are coloured by order — <strong>light blue (order 1) → dark blue (higher orders)</strong>. Line weight also increases with order. Use the order toggles to inspect individual orders.</p>
-        <p>Key properties of Strahler order:
-        <ul>
-          <li>Correlated with <strong>mean annual discharge</strong> and bankfull width</li>
-          <li>Each order increase ≈ 3–5× increase in drainage area (Horton's laws)</li>
-          <li>Order 1–2 streams dominate <strong>hydrograph response time</strong></li>
-          <li>Order 3+ streams control <strong>sediment routing</strong> and in-channel processes</li>
-        </ul></p>
-
-        <h4>Subbasins</h4>
-        <p>Each coloured polygon is an independent drainage unit with its own pour point at the downstream confluence. These are suitable as <strong>HRUs (Hydrological Response Units)</strong> for:</p>
-        <ul>
-          <li>Distributed rainfall-runoff modelling</li>
-          <li>Flood routing (Muskingum-Cunge, etc.)</li>
-          <li>Sediment and nutrient budget calculations</li>
-          <li>Spatial prioritisation of flood mitigation measures</li>
-        </ul>
-        <p><em>Hover over a subbasin</em> to see its ID and cell count. The subbasin ID is preserved in the exported file.</p>
-
-        <h4>Statistics Panel</h4>
-        <table class="param-table">
-          <tr><th>Stat</th><th>Meaning</th></tr>
-          <tr><td>Catchment cells</td><td>Total DEM cells inside the watershed. Multiply by cell area to get km².</td></tr>
-          <tr><td>Subbasins</td><td>Number of distinct drainage units created. More = finer spatial resolution.</td></tr>
-          <tr><td>River segments</td><td>Polyline count. Each segment runs between two network nodes.</td></tr>
-          <tr><td>Max Strahler</td><td>Order of the main stem at the outlet. Gives a rough measure of basin complexity.</td></tr>
-        </table>
+      <div class="method-step">
+        <div class="method-step-title">4 · River Network &amp; Strahler Ordering</div>
+        <p>Stream cells are identified where <code>acc ≥ threshold</code>. The Strahler stream order is computed on-the-fly by pysheds. River polylines are extracted by walking the D8 flow graph between network junctions, then smoothed with <strong>Chaikin corner-cutting</strong> (3 iterations) for display.</p>
       </div>
-    </div>
 
-    <!-- Limitations -->
-    <div class="doc-section">
-      <button class="doc-toggle" onclick="toggleDoc(this)">
-        Limitations &amp; Best Practice <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body">
-        <h4>D8 Single-Flow Direction</h4>
-        <p>D8 routes all flow from a cell to a single downstream neighbour. This causes:</p>
-        <ul>
-          <li><strong>Parallel flow stripes</strong> on gentle slopes — flow is funnelled into artificial channels aligned with cardinal/diagonal directions</li>
-          <li><strong>Underestimation</strong> of contributing area in flat or braided systems</li>
-        </ul>
-        <p>Multiple-flow algorithms (MFD, D-infinity) address this but are computationally heavier and not yet implemented here.</p>
-
-        <h4>DEM Resolution Effects</h4>
-        <p>Stream network density is <strong>strongly resolution-dependent</strong>. A coarser DEM will miss smaller tributaries and produce a simpler network even at low thresholds. The DEM used here has a cell size of ~0.000278° (~25m at this latitude).</p>
-        <ul>
-          <li>At 25m resolution, channels &lt;50m wide may not be resolved</li>
-          <li>Urban areas with drainage infrastructure are not represented</li>
-          <li>Culverted watercourses can appear as disconnected</li>
-        </ul>
-
-        <h4>Depression Filling Artefacts</h4>
-        <p>Genuine enclosed basins (lakes, reservoirs, karst) are treated as artefacts and filled. If your catchment contains lakes, the delineated boundary may differ from the true hydrological boundary.</p>
-
-        <h4>Outlet Placement</h4>
-        <p>Place your outlet at or very near a <strong>visible stream channel</strong>. Clicking on a hillslope will snap to the nearest stream cell, which may not be the intended location. The snapping radius is 15 cells — if no stream cell exists within that radius (given the current threshold), the click location is used as-is and may produce a very small or empty catchment.</p>
-        <p><em>Best practice:</em> Zoom in before clicking; use a lower threshold if the stream network looks sparse at your outlet location.</p>
-
-        <h4>Flat and Coastal Areas</h4>
-        <p>Coastal floodplains and very flat terrain produce unreliable flow directions after DEM conditioning. Multiple valid paths may exist. Treat results in these areas with caution and validate against surveyed channel data.</p>
+      <div class="method-step">
+        <div class="method-step-title">5 · Outlet Snapping</div>
+        <p>A click on the map snaps to the <strong>nearest stream cell</strong> (minimum Euclidean distance) within a 15-cell search radius. This preserves the user's intended location rather than jumping to the highest-accumulation cell in the area.</p>
       </div>
-    </div>
 
-    <!-- References -->
-    <div class="doc-section">
-      <button class="doc-toggle" onclick="toggleDoc(this)">
-        Algorithms &amp; References <span class="arrow">&#9658;</span>
-      </button>
-      <div class="doc-body">
-        <h4>Libraries</h4>
-        <ul>
-          <li><strong>pysheds</strong> — DEM conditioning, D8 flow direction &amp; accumulation</li>
-          <li><strong>rasterio</strong> — raster I/O and coordinate transforms</li>
-          <li><strong>geopandas / shapely</strong> — vector polygon handling and export</li>
-          <li><strong>scipy.ndimage</strong> — distance transform for gap-fill</li>
-          <li><strong>Flask</strong> — lightweight Python web server</li>
-          <li><strong>Leaflet.js</strong> — interactive web mapping</li>
-        </ul>
-        <h4>Key references</h4>
-        <ul>
-          <li>O'Callaghan &amp; Mark (1984) — D8 flow direction algorithm</li>
-          <li>Strahler (1957) — Stream order classification</li>
-          <li>Wang &amp; Liu (2006) — Efficient depression filling</li>
-          <li>Barnes et al. (2014) — Priority-flood flat resolution</li>
-          <li>Horton (1945) — Laws of drainage basin composition</li>
-          <li>Montgomery &amp; Dietrich (1992) — Channel initiation thresholds</li>
-        </ul>
-        <h4>D8 direction encoding</h4>
-        <p>pysheds uses <code>dirmap=(64,128,1,2,4,8,16,32)</code>:</p>
-        <table class="param-table">
-          <tr><th>Code</th><th>Direction</th><th>Code</th><th>Direction</th></tr>
-          <tr><td>64</td><td>N ↑</td><td>128</td><td>NE ↗</td></tr>
-          <tr><td>1</td><td>E →</td><td>2</td><td>SE ↘</td></tr>
-          <tr><td>4</td><td>S ↓</td><td>8</td><td>SW ↙</td></tr>
-          <tr><td>16</td><td>W ←</td><td>32</td><td>NW ↖</td></tr>
-        </table>
+      <div class="method-step">
+        <div class="method-step-title">6 · Catchment Delineation</div>
+        <p>Starting from the snapped outlet cell, a <strong>BFS (breadth-first search)</strong> traversal walks upstream through the D8 flow-direction grid. The resulting boolean mask is ANDed with the polygon valid-mask to guarantee no catchment cells leak outside the drawn boundary. The mask is then vectorised to a polygon with <code>rasterio.features.shapes</code>.</p>
       </div>
-    </div>
 
-    <div style="padding:14px 16px; font-size:10px; color:var(--muted2); border-top:1px solid var(--border);">
-      Built with pysheds · rasterio · Flask · Leaflet
-    </div>
+      <div class="method-step">
+        <div class="method-step-title">7 · Export</div>
+        <p>Results are packaged as a <strong>ZIP archive</strong> containing:</p>
+        <ul>
+          <li><code>catchment_results.gpkg</code> — catchments, outlets, river network (vector)</li>
+          <li><code>dem.tif</code> — clipped SRTM elevation raster (Float32, LZW)</li>
+          <li><code>flow_accumulation.tif</code> — upstream cell count raster (Float32)</li>
+          <li><code>flow_direction.tif</code> — D8 direction codes raster (Int16)</li>
+        </ul>
+        <p style="margin-top:4px;">All rasters use the original WGS84 projection and affine transform of the clipped DEM.</p>
+      </div>
 
-  </div><!-- end #tab-docs -->
+      <div class="method-step" style="margin-top:16px; border-top:1px solid var(--border); padding-top:12px;">
+        <div class="method-step-title">References</div>
+        <ul>
+          <li>Farr, T. G. et al. (2007). The Shuttle Radar Topography Mission. <em>Reviews of Geophysics</em>, 45(2). <a href="https://doi.org/10.1029/2005RG000183" target="_blank" style="color:var(--accent2);">doi:10.1029/2005RG000183</a></li>
+          <li>OpenTopography (2013). SRTM GL1 Global 30m. <em>OpenTopography Facility</em>. <a href="https://doi.org/10.5069/G9445JDF" target="_blank" style="color:var(--accent2);">doi:10.5069/G9445JDF</a></li>
+          <li>O'Callaghan, J. F. &amp; Mark, D. M. (1984). The extraction of drainage networks from digital elevation data. <em>Computer Vision, Graphics, and Image Processing</em>, 28(3), 323–344. <a href="https://doi.org/10.1016/S0734-189X(84)80011-0" target="_blank" style="color:var(--accent2);">doi:10.1016/S0734-189X(84)80011-0</a></li>
+          <li>Jenson, S. K. &amp; Domingue, J. O. (1988). Extracting topographic structure from digital elevation data for geographic information system analysis. <em>Photogrammetric Engineering and Remote Sensing</em>, 54(11), 1593–1600.</li>
+          <li>Strahler, A. N. (1957). Quantitative analysis of watershed geomorphology. <em>Transactions, American Geophysical Union</em>, 38(6), 913–920. <a href="https://doi.org/10.1029/TR038i006p00913" target="_blank" style="color:var(--accent2);">doi:10.1029/TR038i006p00913</a></li>
+          <li>Chaikin, G. M. (1974). An algorithm for high speed curve generation. <em>Computer Graphics and Image Processing</em>, 3(4), 346–349. <a href="https://doi.org/10.1016/0146-664X(74)90028-8" target="_blank" style="color:var(--accent2);">doi:10.1016/0146-664X(74)90028-8</a></li>
+          <li>Garrote, J. (2022). pysheds: Fast and flexible watershed delineation in Python. <em>Journal of Open Source Software</em>, 7(74), 4296. <a href="https://doi.org/10.21105/joss.04296" target="_blank" style="color:var(--accent2);">doi:10.21105/joss.04296</a></li>
+          <li>Gillies, S. et al. (2013). Rasterio: Geospatial raster I/O for Python. <a href="https://github.com/rasterio/rasterio" target="_blank" style="color:var(--accent2);">github.com/rasterio/rasterio</a></li>
+          <li>Jordahl, K. et al. (2020). GeoPandas: Python tools for geographic data. <a href="https://doi.org/10.5281/zenodo.5573592" target="_blank" style="color:var(--accent2);">doi:10.5281/zenodo.5573592</a></li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+  </div><!-- end #tab-method -->
+
 </div>
 
-<!-- ── Coordinate display ──────────────────────────────────────────────────── -->
-<div id="coords-display">— °&nbsp;&nbsp;— °</div>
-
-<!-- ── Map ────────────────────────────────────────────────────────────────── -->
+<!-- ── Map ──────────────────────────────────────────────────────────────────── -->
 <div id="map"></div>
+<div id="coords-display">— °   — °</div>
 
 <!-- Map legend -->
 <div id="map-legend">
-  <h4>Stream order</h4>
+  <h4>River order</h4>
   <div id="legend-orders"></div>
 </div>
 
 <!-- Loading overlay -->
 <div id="loader">
   <div class="spinner"></div>
-  <p id="loader-text">Running analysis…</p>
+  <p id="loader-text">Processing…</p>
+  <p id="loader-detail"></p>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
-let clickedLatLng = null;
-let outletMarker  = null;
-let mainLayers    = { catchment: null, subbasins: null, dem: null };
-let orderLayers   = {};   // { 1: L.geoJSON, 2: L.geoJSON, … }
-let demLoaded     = false;
+let demLoaded    = false;
+let drawnPolygon = null;
+let drawnLayer   = null;
+let outlets      = [];        // [{id, lat, lon, color, marker, catchLayer}]
+let nextId       = 1;
+let rasterLayers = { dem: null, acc: null, fdir: null };
+let orderLayers  = {};        // {order: L.geoJSON}
+let demBounds    = null;      // [[s,w],[n,e]]
 
-const BASIN_COLORS = [
-  '#4e9fd4','#6ec9a3','#e8a55a','#d46e8c','#9b7ed4',
-  '#d4c44e','#5ad4cc','#d47c4e','#8cd44e','#d44e4e',
-  '#4e7cd4','#a8d44e'
+const OUTLET_COLORS = [
+  '#ff4444','#ff9900','#22cc66','#3399ff',
+  '#cc44ff','#ff4488','#ffcc00','#44cccc',
+  '#ff6644','#88dd00','#0088ff','#ff66cc'
 ];
 
-function riverColor(order) {
-  const c = ['#b3d9f5','#74b8e8','#3a8fd4','#1a68b0','#0d4a8a','#062c58'];
-  return c[Math.min(order - 1, c.length - 1)];
+function riverColor(o) {
+  return ['#b3d9f5','#74b8e8','#3a8fd4','#1a68b0','#0d4a8a','#062c58'][Math.min(o-1,5)];
 }
-function riverWeight(order) { return Math.max(1, order * 0.9 + 0.8); }
+function riverWeight(o) { return Math.max(1, o*0.9+0.8); }
 
 // ── Map init ──────────────────────────────────────────────────────────────────
-const map = L.map('map', { zoomControl: true, preferCanvas: true });
+const map = L.map('map', { zoomControl: true, preferCanvas: false });
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '© OpenStreetMap contributors',
-  maxZoom: 19,
-  opacity: 0.65,
+  attribution:'© OpenStreetMap contributors', maxZoom:19, opacity:0.65
 }).addTo(map);
 map.setView([20, 0], 3);
-setStatus('Click anywhere on the map to centre the download area.', '');
 
-// Dedicated pane for DEM — always behind all vector/marker layers
-map.createPane('demPane');
-map.getPane('demPane').style.zIndex = 250;
+map.createPane('demPane');  map.getPane('demPane').style.zIndex  = 250;
+map.createPane('accPane');  map.getPane('accPane').style.zIndex  = 260;
+map.createPane('fdirPane'); map.getPane('fdirPane').style.zIndex = 270;
 
-// ── Search bar ────────────────────────────────────────────────────────────────
-L.Control.geocoder({
-  defaultMarkGeocode: false,
-  placeholder: 'Search location…',
-  collapsed: false,
-  geocoder: L.Control.Geocoder.nominatim(),
-}).on('markgeocode', function(e) {
-  map.fitBounds(e.geocode.bbox, { maxZoom: 12 });
-}).addTo(map);
+// ── Draw control ──────────────────────────────────────────────────────────────
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  draw: {
+    polygon:      { allowIntersection:false, showArea:true, shapeOptions:{color:'#7ec8e3',weight:2,fillOpacity:0.15} },
+    rectangle:    { shapeOptions:{color:'#7ec8e3',weight:2,fillOpacity:0.15} },
+    circle:false, circlemarker:false, marker:false, polyline:false,
+  },
+  edit: { featureGroup: drawnItems },
+});
+map.addControl(drawControl);
+
+map.on(L.Draw.Event.CREATED, function(e) {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(e.layer);
+  drawnLayer   = e.layer;
+  drawnPolygon = e.layer.toGeoJSON().geometry;
+  const b = e.layer.getBounds();
+  document.getElementById('polygon-info').style.display = 'block';
+  document.getElementById('polygon-bbox-text').textContent =
+    `Bbox: S ${b.getSouth().toFixed(4)}° N ${b.getNorth().toFixed(4)}° W ${b.getWest().toFixed(4)}° E ${b.getEast().toFixed(4)}°`;
+  document.getElementById('download-btn').disabled = false;
+  document.getElementById('instruction-text').textContent =
+    'Study area defined — click "Download SRTM DEM" to fetch terrain.';
+  setStatus('Study area defined. Click Download SRTM DEM.', '');
+});
+
+// ── Geocoder ──────────────────────────────────────────────────────────────────
+L.Control.geocoder({ defaultMarkGeocode:false, placeholder:'Search location…',
+  collapsed:false, geocoder:L.Control.Geocoder.nominatim() })
+  .on('markgeocode', e => map.fitBounds(e.geocode.bbox, {maxZoom:12}))
+  .addTo(map);
 
 // ── Cursor coordinates ────────────────────────────────────────────────────────
 const _coordsEl = document.getElementById('coords-display');
-map.on('mousemove', e => {
-  _coordsEl.textContent = `${e.latlng.lat.toFixed(5)}°   ${e.latlng.lng.toFixed(5)}°`;
-});
-map.on('mouseout', () => {
-  _coordsEl.textContent = '— °   — °';
+map.on('mousemove', e => { _coordsEl.textContent = `${e.latlng.lat.toFixed(5)}°   ${e.latlng.lng.toFixed(5)}°`; });
+map.on('mouseout',  () => { _coordsEl.textContent = '— °   — °'; });
+
+// ── Map click → snap + delineate ─────────────────────────────────────────────
+map.on('click', e => {
+  if (!demLoaded) return;
+  const acc = parseInt(document.getElementById('acc-slider').value);
+  placeOutletAndDelineate(e.latlng.lat, e.latlng.lng, acc);
 });
 
-// ── Click handler ─────────────────────────────────────────────────────────────
-map.on('click', e => {
-  if (!demLoaded) {
-    // Before DEM: just set the download centre
-    clickedLatLng = e.latlng;
-    if (outletMarker) map.removeLayer(outletMarker);
-    outletMarker = L.circleMarker(e.latlng, {
-      radius: 7, color: '#7ec8e3', weight: 2,
-      fillColor: '#1a4a6e', fillOpacity: 0.9,
-    }).addTo(map).bindTooltip(
-      `Download centre: ${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}`
-    );
-    document.getElementById('download-btn').disabled = false;
-    document.getElementById('instruction-text').textContent =
-      `Area set at (${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}). ` +
-      'Now click "Download DEM" to fetch the terrain.';
-    setStatus('Area set — click Download DEM.', '');
-  } else {
-    // After DEM loaded: snap click to nearest stream
-    const acc = parseInt(document.getElementById('acc-slider').value);
-    fetch('/api/snap', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ lat: e.latlng.lat, lon: e.latlng.lng, acc_threshold: acc }),
+function placeOutletAndDelineate(lat, lon, acc) {
+  setStatus('Snapping to stream…', '');
+  setLoader('Snapping click to nearest stream…', '');
+
+  fetch('/api/snap', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ lat, lon, acc_threshold: acc }),
+  })
+  .then(r => r.json())
+  .then(snap => {
+    if (snap.error) { hideLoader(); setStatus('Snap error: '+snap.error,'error'); return; }
+
+    const id    = nextId++;
+    const color = OUTLET_COLORS[(id-1) % OUTLET_COLORS.length];
+
+    setLoader('Running catchment delineation…', `Outlet #${id} at (${snap.lat.toFixed(4)}, ${snap.lon.toFixed(4)})`);
+
+    // Place provisional marker immediately
+    const marker = L.circleMarker([snap.lat, snap.lon], {
+      radius:9, color:'#fff', weight:2.5, fillColor:color, fillOpacity:1,
+    }).addTo(map).bindTooltip(`<b>Outlet #${id}</b><br>Acc: ${snap.acc.toLocaleString()}${snap.snapped?'<br><i>snapped to stream</i>':''}`);
+
+    return fetch('/api/delineate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ lat: snap.lat, lon: snap.lon, acc_threshold: acc }),
     })
     .then(r => r.json())
-    .then(snap => {
-      if (snap.error) { setStatus('Snap error: ' + snap.error, 'error'); return; }
-      clickedLatLng = { lat: snap.lat, lng: snap.lon };
-      if (outletMarker) map.removeLayer(outletMarker);
-      outletMarker = L.circleMarker([snap.lat, snap.lon], {
-        radius: 8, color: '#fff', weight: 2.5,
-        fillColor: '#ff3333', fillOpacity: 1,
-      }).addTo(map).bindTooltip(
-        `<b>Outlet</b><br>Acc: ${snap.acc.toLocaleString()}${snap.snapped ? '<br><i>snapped to stream</i>' : ''}`
+    .then(result => {
+      hideLoader();
+      if (result.error) {
+        map.removeLayer(marker);
+        setStatus('Delineation error: '+result.error, 'error');
+        return;
+      }
+      // Draw catchment
+      let catchLayer = null;
+      if (result.catchment && result.catchment.features.length) {
+        catchLayer = L.geoJSON(result.catchment, {
+          style: { color: color, weight: 2.5, fillColor: color, fillOpacity: 0.15, dashArray: '6 3' },
+        }).addTo(map);
+      }
+      const outlet = { id, lat: snap.lat, lon: snap.lon, color, marker, catchLayer, stats: result.stats };
+      outlets.push(outlet);
+      renderOutletList();
+      document.getElementById('export-section').style.display = 'block';
+      const s = result.stats;
+      setStatus(
+        `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped?' (snapped)':''}`,
+        'ok'
       );
-      document.getElementById('run-btn').disabled = false;
-      document.getElementById('instruction-text').textContent =
-        `Outlet set${snap.snapped ? ' (snapped to stream)' : ''} at ` +
-        `(${snap.lat.toFixed(4)}, ${snap.lon.toFixed(4)}). ` +
-        'Adjust parameters then click Run Analysis.';
-      setStatus(`Outlet placed — acc ${snap.acc.toLocaleString()}. Ready to run.`, 'ok');
-    })
-    .catch(err => setStatus('Error: ' + err, 'error'));
+    });
+  })
+  .catch(err => { hideLoader(); setStatus('Error: '+err, 'error'); });
+}
+
+// ── Outlet list ───────────────────────────────────────────────────────────────
+function renderOutletList() {
+  const div = document.getElementById('outlet-list');
+  if (!outlets.length) {
+    div.innerHTML = '<div id="outlet-list-empty">No outlets placed yet.</div>';
+    return;
   }
-});
+  div.innerHTML = outlets.map(o => `
+    <div class="outlet-item">
+      <div class="outlet-dot" style="background:${o.color};"></div>
+      <div class="outlet-info">
+        <div class="coords">#${o.id} &nbsp; ${o.lat.toFixed(4)}, ${o.lon.toFixed(4)}</div>
+        <div class="stats">${o.stats.area_km2} km² · order ${o.stats.max_strahler}</div>
+      </div>
+      <button class="outlet-remove" onclick="removeOutlet(${o.id})" title="Remove outlet #${o.id}">&times;</button>
+    </div>
+  `).join('');
+}
 
-// ── Slider wiring ─────────────────────────────────────────────────────────────
-document.getElementById('acc-slider').addEventListener('input', function() {
-  document.getElementById('acc-val').textContent = this.value;
-  updateEffectLabels();
-  scheduleRiverRefresh();
-});
-document.getElementById('ord-slider').addEventListener('input', function() {
-  document.getElementById('ord-val').textContent = this.value;
-  updateEffectLabels();
-});
-document.getElementById('basin-slider').addEventListener('input', function() {
-  document.getElementById('basin-val').textContent = this.value;
-  updateEffectLabels();
-});
-document.getElementById('radius-slider').addEventListener('input', function() {
-  document.getElementById('radius-val').textContent = this.value;
-  updateEffectLabels();
-});
+function removeOutlet(id) {
+  const idx = outlets.findIndex(o => o.id === id);
+  if (idx < 0) return;
+  const o = outlets[idx];
+  if (o.marker)     map.removeLayer(o.marker);
+  if (o.catchLayer) map.removeLayer(o.catchLayer);
+  outlets.splice(idx, 1);
+  renderOutletList();
+  // Sync with server
+  fetch('/api/clear_results', { method:'POST' });
+  if (!outlets.length) document.getElementById('export-section').style.display = 'none';
+  setStatus('Outlet #'+id+' removed.', '');
+}
 
-function updateEffectLabels() {
-  const acc    = parseInt(document.getElementById('acc-slider').value);
-  const ord    = parseInt(document.getElementById('ord-slider').value);
-  const pct    = parseInt(document.getElementById('basin-slider').value);
-  const radius = parseInt(document.getElementById('radius-slider').value);
-
-  const accEffect = acc < 300  ? 'Dense tributary network' :
-                    acc < 1000 ? 'Moderate stream network' :
-                    acc < 3000 ? 'Main rivers only' : 'Very sparse — major rivers only';
-  document.getElementById('acc-effect').textContent = '→ ' + accEffect;
-
-  const ordNames = ['','Headwaters','Major tributaries','Sub-tributaries','4th order','5th order','6th order'];
-  document.getElementById('ord-effect').textContent =
-    `→ Subbasins split at ${ordNames[ord] || 'order '+ord} confluences`;
-
-  document.getElementById('basin-effect').textContent =
-    `→ Include basins ≥ ${pct}% of total catchment area`;
-
-  document.getElementById('radius-effect').textContent =
-    `→ ~${radius} km radius DEM download`;
+function clearAllOutlets() {
+  resetAll();
 }
 
 // ── Download DEM ──────────────────────────────────────────────────────────────
 function downloadDEM() {
-  if (!clickedLatLng) return;
-  const radius = parseInt(document.getElementById('radius-slider').value);
-  showLoader(`Downloading DEM tiles (${radius} km radius)…`);
-  setStatus('Downloading DEM tiles from AWS…', '');
+  if (!drawnPolygon) return;
 
-  const t1 = setTimeout(() => {
-    document.getElementById('loader-text').textContent = 'Conditioning DEM (fill pits & depressions)…';
-    setStatus('Conditioning DEM…', '');
-  }, 2000);
-  const t2 = setTimeout(() => {
-    document.getElementById('loader-text').textContent = 'Computing flow direction & accumulation…';
-    setStatus('Computing flow routing…', '');
-  }, 5000);
+  // Clear any previous analysis (outlets, rasters, rivers) but keep the drawn polygon
+  outlets.forEach(o => {
+    if (o.marker)     map.removeLayer(o.marker);
+    if (o.catchLayer) map.removeLayer(o.catchLayer);
+  });
+  outlets = [];
+  renderOutletList();
+  fetch('/api/clear_results', { method: 'POST' });
+  ['dem','acc','fdir'].forEach(k => {
+    if (rasterLayers[k]) { map.removeLayer(rasterLayers[k]); rasterLayers[k] = null; }
+  });
+  clearRivers();
+  demLoaded = false; demBounds = null;
+  document.getElementById('dem-info').style.display        = 'none';
+  document.getElementById('params-section').style.display  = 'none';
+  document.getElementById('raster-section').style.display  = 'none';
+  document.getElementById('outlets-section').style.display = 'none';
+  document.getElementById('export-section').style.display  = 'none';
+  document.getElementById('tog-dem').checked  = true;
+  document.getElementById('tog-acc').checked  = false;
+  document.getElementById('tog-fdir').checked = false;
+
+  setLoader('Connecting to OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
+
+  // Timed progress messages
+  const msgs = [
+    [3000,  'Downloading SRTM tile(s)…',         'This may take a moment for large areas'],
+    [9000,  'Conditioning DEM…',                  'Filling pits and depressions (pysheds)'],
+    [16000, 'Computing flow direction…',           'D8 routing across every cell'],
+    [22000, 'Computing flow accumulation…',        'Counting upstream contributing cells'],
+    [30000, 'Extracting river network…',           'Tracing streams, computing Strahler orders'],
+  ];
+  const timers = msgs.map(([ms, txt, detail]) =>
+    setTimeout(() => setLoader(txt, detail), ms)
+  );
 
   fetch('/api/fetch_dem', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      lat: clickedLatLng.lat,
-      lon: clickedLatLng.lng,
-      radius_km: radius,
-    }),
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ polygon: drawnPolygon }),
   })
   .then(r => r.json())
   .then(info => {
-    clearTimeout(t1); clearTimeout(t2);
+    timers.forEach(clearTimeout);
     hideLoader();
-    if (info.error) { setStatus('DEM download error: ' + info.error, 'error'); return; }
+    if (info.error) { setStatus('DEM error: '+info.error, 'error'); return; }
 
     demLoaded = true;
+    const b   = info.bounds;
+    demBounds = [[b.south, b.west], [b.north, b.east]];
 
-    // Show DEM overlay
-    const b = info.bounds;
-    const leafBounds = [[b.south, b.west], [b.north, b.east]];
-    if (mainLayers.dem) map.removeLayer(mainLayers.dem);
-    mainLayers.dem = L.imageOverlay(
-      '/api/dem_preview.png?' + Date.now(),
-      leafBounds,
-      { opacity: 1.0, interactive: false, pane: 'demPane' }
+    // DEM terrain overlay
+    if (rasterLayers.dem) map.removeLayer(rasterLayers.dem);
+    rasterLayers.dem = L.imageOverlay(
+      '/api/dem_preview.png?' + Date.now(), demBounds,
+      { opacity:1.0, interactive:false, pane:'demPane' }
     ).addTo(map);
     document.getElementById('tog-dem').checked = true;
 
-    // Fit map to DEM
-    map.fitBounds(leafBounds, { padding: [20, 20] });
+    // Flow accumulation overlay (not shown by default)
+    if (rasterLayers.acc) map.removeLayer(rasterLayers.acc);
+    rasterLayers.acc = L.imageOverlay(
+      '/api/acc_image?' + Date.now(), demBounds,
+      { opacity:1.0, interactive:false, pane:'accPane' }
+    ); // NOT added to map yet — toggle is off
+    document.getElementById('tog-acc').checked = false;
 
-    // Set suggested acc threshold from p95
+    // Flow direction overlay (not shown by default)
+    if (rasterLayers.fdir) map.removeLayer(rasterLayers.fdir);
+    rasterLayers.fdir = L.imageOverlay(
+      '/api/fdir_image?' + Date.now(), demBounds,
+      { opacity:1.0, interactive:false, pane:'fdirPane' }
+    ); // NOT added to map yet — toggle is off
+    document.getElementById('tog-fdir').checked = false;
+
+    map.fitBounds(demBounds, { padding:[20,20] });
+
+    // Accumulation threshold
     const p95 = Math.round(info.acc_p95 / 50) * 50;
     document.getElementById('acc-slider').value = p95;
     document.getElementById('acc-val').textContent = p95;
-    updateEffectLabels();
+    updateEffectLabel();
 
-    // Show river network
+    // River network
     if (info.rivers && info.rivers.features.length) {
-      clearPreviewRivers();
+      clearRivers();
       buildOrderLayers(info.rivers);
     }
 
-    // Show DEM info card
     document.getElementById('dem-res-val').textContent = info.res_m + ' m';
-    document.getElementById('dem-info').style.display = 'block';
-
-    // Keep run button disabled until outlet placed on river
-    document.getElementById('run-btn').disabled = true;
+    document.getElementById('dem-info').style.display   = 'block';
+    document.getElementById('params-section').style.display  = 'block';
+    document.getElementById('raster-section').style.display  = 'block';
+    document.getElementById('outlets-section').style.display = 'block';
 
     document.getElementById('instruction-text').textContent =
-      `Rivers extracted. Now click on any river to place your outlet point.`;
+      `DEM ready (${info.res_m} m). Click on a stream to place an outlet and delineate its catchment.`;
     setStatus(
-      `✓ DEM ready · ${info.res_m} m res · ${info.rivers ? info.rivers.features.length : 0} river segments — click a river to set outlet`,
+      `✓ DEM loaded · ${info.res_m} m · ${info.rivers ? info.rivers.features.length : 0} river segments · click a stream to delineate`,
       'ok'
     );
   })
-  .catch(e => { clearTimeout(t1); clearTimeout(t2); hideLoader(); setStatus('Network error: ' + e, 'error'); });
+  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Network error: '+e, 'error'); });
 }
 
-// ── Run delineation ───────────────────────────────────────────────────────────
-function runDelineation() {
-  if (!clickedLatLng) return;
-  showLoader('Running catchment delineation…');
-  setStatus('Delineating catchment…', '');
-
-  const t1 = setTimeout(() => {
-    document.getElementById('loader-text').textContent = 'Extracting stream network…';
-  }, 2000);
-  const t2 = setTimeout(() => {
-    document.getElementById('loader-text').textContent = 'Building subbasins & vectorising…';
-  }, 5000);
-
-  fetch('/api/delineate', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      lat:           clickedLatLng.lat,
-      lon:           clickedLatLng.lng,
-      radius_km:     parseInt(document.getElementById('radius-slider').value),
-      acc_threshold: parseInt(document.getElementById('acc-slider').value),
-      min_order:     parseInt(document.getElementById('ord-slider').value),
-      min_basin_pct: parseFloat(document.getElementById('basin-slider').value),
-    }),
-  })
-  .then(r => r.json())
-  .then(result => {
-    clearTimeout(t1); clearTimeout(t2);
-    hideLoader();
-    if (result.error) { setStatus('Error: ' + result.error, 'error'); return; }
-    displayResults(result);
-  })
-  .catch(e => {
-    clearTimeout(t1); clearTimeout(t2);
-    hideLoader();
-    setStatus('Network error: ' + e, 'error');
-  });
-}
-
-// ── Preview river helpers ─────────────────────────────────────────────────────
-function clearPreviewRivers() {
+// ── River helpers ─────────────────────────────────────────────────────────────
+function clearRivers() {
   Object.values(orderLayers).forEach(l => map.removeLayer(l));
   orderLayers = {};
   document.getElementById('order-toggles').innerHTML = '';
-  document.getElementById('map-legend').style.display  = 'none';
+  document.getElementById('map-legend').style.display = 'none';
   document.getElementById('river-section').style.display = 'none';
 }
 
-let _riverRefreshTimer = null;
+let _riverTimer = null;
 function scheduleRiverRefresh() {
   if (!demLoaded) return;
-  clearTimeout(_riverRefreshTimer);
-  _riverRefreshTimer = setTimeout(() => {
+  clearTimeout(_riverTimer);
+  _riverTimer = setTimeout(() => {
     const acc = parseInt(document.getElementById('acc-slider').value);
+    setStatus('Refreshing river network…', '');
     fetch('/api/rivers', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ acc_threshold: acc }),
     })
     .then(r => r.json())
     .then(data => {
-      if (data.rivers) { clearPreviewRivers(); buildOrderLayers(data.rivers); }
+      if (data.rivers) {
+        clearRivers();
+        buildOrderLayers(data.rivers);
+        setStatus(`River network updated — ${data.rivers.features.length} segments`, 'ok');
+      }
     });
   }, 600);
 }
 
-// ── Display results ───────────────────────────────────────────────────────────
-function clearResultLayers() {
-  ['catchment','subbasins'].forEach(k => {
-    if (mainLayers[k]) { map.removeLayer(mainLayers[k]); mainLayers[k] = null; }
-  });
-  clearPreviewRivers();
-}
-
-function displayResults(data) {
-  clearResultLayers();
-  const s = data.stats;
-
-  // Snapped outlet marker
-  if (data.outlet && data.outlet.features.length) {
-    const co = data.outlet.features[0].geometry.coordinates;
-    if (outletMarker) map.removeLayer(outletMarker);
-    outletMarker = L.circleMarker([co[1], co[0]], {
-      radius: 9, color: '#fff', weight: 2.5,
-      fillColor: '#ff2222', fillOpacity: 1,
-    }).addTo(map).bindTooltip(
-      `<b>Outlet (snapped)</b><br>Accumulation: ${data.outlet.features[0].properties.acc.toLocaleString()}`
-    );
-  }
-
-  // Catchment boundary
-  if (data.catchment && data.catchment.features.length) {
-    mainLayers.catchment = L.geoJSON(data.catchment, {
-      style: { color: '#3b9fd1', weight: 2.5, fill: false, dashArray: '8 4' },
-    }).addTo(map);
-  }
-
-  // Subbasins
-  if (data.subbasins && data.subbasins.features.length) {
-    mainLayers.subbasins = L.geoJSON(data.subbasins, {
-      style: f => ({
-        color: '#fff', weight: 1,
-        fillColor: BASIN_COLORS[(f.properties.id - 1) % BASIN_COLORS.length],
-        fillOpacity: 0.4,
-      }),
-      onEachFeature: (f, layer) => {
-        layer.bindTooltip(
-          `<b>Subbasin ${f.properties.id}</b><br>` +
-          `Cells: ${f.properties.cells.toLocaleString()}`
-        );
-        layer.on('mouseover', function() { this.setStyle({ fillOpacity: 0.65 }); });
-        layer.on('mouseout',  function() { this.setStyle({ fillOpacity: 0.4  }); });
-      }
-    }).addTo(map);
-  }
-
-  // Rivers — grouped by Strahler order
-  buildOrderLayers(data.rivers);
-
-  // Fit to catchment
-  if (mainLayers.catchment) {
-    map.fitBounds(mainLayers.catchment.getBounds(), { padding: [30, 30] });
-  }
-
-  // Stats
-  document.getElementById('stat-cells').textContent  = s.catchment_cells.toLocaleString();
-  document.getElementById('stat-basins').textContent = s.n_subbasins;
-  document.getElementById('stat-rivers').textContent = s.n_rivers;
-  document.getElementById('stat-order').textContent  = s.max_strahler;
-
-  document.getElementById('results-section').style.display = 'block';
-  document.getElementById('export-section').style.display  = 'block';
-
-  const snap = s.snapped ? ' (snapped to nearest stream)' : '';
-  setStatus(
-    `✓ ${s.catchment_cells.toLocaleString()} cells · ` +
-    `${s.n_subbasins} subbasins · ` +
-    `${s.n_rivers} river segments · ` +
-    `max order ${s.max_strahler}${snap}`,
-    'ok'
-  );
-}
-
-// ── Order layers ──────────────────────────────────────────────────────────────
 function buildOrderLayers(riverFC) {
   if (!riverFC || !riverFC.features.length) return;
-
   const orders = [...new Set(riverFC.features.map(f => f.properties.order))].sort((a,b)=>a-b);
-
   orders.forEach(ord => {
-    const fc = {
-      type: 'FeatureCollection',
-      features: riverFC.features.filter(f => f.properties.order === ord),
-    };
+    const fc = { type:'FeatureCollection', features: riverFC.features.filter(f => f.properties.order===ord) };
     orderLayers[ord] = L.geoJSON(fc, {
-      style: { color: riverColor(ord), weight: riverWeight(ord), opacity: 0.9 },
-      onEachFeature: (f, layer) => {
-        layer.bindTooltip(
-          `<b>Order ${ord}</b><br>` +
-          `Acc: ${f.properties.acc.toLocaleString()}`
-        );
-      }
+      style: { color:riverColor(ord), weight:riverWeight(ord), opacity:0.9 },
+      onEachFeature: (f,layer) => layer.bindTooltip(`<b>Order ${ord}</b><br>Acc: ${f.properties.acc.toLocaleString()}`)
     }).addTo(map);
   });
-
   buildOrderToggles(orders);
   buildLegend(orders);
-  showRiverSection();
+  document.getElementById('river-section').style.display = 'block';
 }
 
 function buildOrderToggles(orders) {
-  const container = document.getElementById('order-toggles');
-  container.innerHTML = '';
+  const master = document.getElementById('tog-river-all');
+  if (master) { master.checked = true; master.indeterminate = false; }
+  const c = document.getElementById('order-toggles');
+  c.innerHTML = '';
   orders.forEach(ord => {
     const label = document.createElement('label');
     label.className = 'toggle-row';
     label.innerHTML = `
-      <input type="checkbox" id="tog-order-${ord}" checked
-             onchange="toggleOrder(${ord})"/>
-      <span class="color-swatch" style="background:${riverColor(ord)};
-            height:${riverWeight(ord)+1}px;"></span>
-      Order ${ord} ${ord===1?'(headwater streams)':ord===2?'(tributaries)':'(main river)'}
+      <input type="checkbox" id="tog-order-${ord}" checked onchange="toggleOrder(${ord})"/>
+      <span class="color-swatch" style="background:${riverColor(ord)};height:${riverWeight(ord)+1}px;"></span>
+      Order ${ord} ${ord===1?'(headwater)':ord===2?'(tributary)':'(main)'}
     `;
-    container.appendChild(label);
+    c.appendChild(label);
   });
 }
 
-function showRiverSection() {
-  document.getElementById('river-section').style.display = 'block';
+function _syncMasterToggle() {
+  const keys = Object.keys(orderLayers);
+  if (!keys.length) return;
+  const allOn  = keys.every(o => { const cb = document.getElementById(`tog-order-${o}`); return cb && cb.checked; });
+  const anyOn  = keys.some(o  => { const cb = document.getElementById(`tog-order-${o}`); return cb && cb.checked; });
+  const master = document.getElementById('tog-river-all');
+  if (!master) return;
+  master.checked       = anyOn;
+  master.indeterminate = anyOn && !allOn;
 }
 
 function buildLegend(orders) {
@@ -1476,11 +770,8 @@ function buildLegend(orders) {
   orders.forEach(ord => {
     const div = document.createElement('div');
     div.className = 'leg-row';
-    div.innerHTML = `
-      <span style="display:inline-block;width:24px;height:${riverWeight(ord)+1}px;
-            background:${riverColor(ord)};border-radius:2px;"></span>
-      Order ${ord}
-    `;
+    div.innerHTML = `<span style="display:inline-block;width:24px;height:${riverWeight(ord)+1}px;
+      background:${riverColor(ord)};border-radius:2px;"></span> Order ${ord}`;
     leg.appendChild(div);
   });
   document.getElementById('map-legend').style.display = 'block';
@@ -1488,12 +779,10 @@ function buildLegend(orders) {
 
 function toggleOrder(ord) {
   const checked = document.getElementById(`tog-order-${ord}`).checked;
-  const layer   = orderLayers[ord];
-  if (!layer) return;
-  if (checked) map.addLayer(layer);
-  else         map.removeLayer(layer);
+  if (checked) map.addLayer(orderLayers[ord]);
+  else         map.removeLayer(orderLayers[ord]);
+  _syncMasterToggle();
 }
-
 function toggleAllOrders(show) {
   Object.keys(orderLayers).forEach(ord => {
     const cb = document.getElementById(`tog-order-${ord}`);
@@ -1501,37 +790,76 @@ function toggleAllOrders(show) {
     if (show) map.addLayer(orderLayers[ord]);
     else      map.removeLayer(orderLayers[ord]);
   });
+  const master = document.getElementById('tog-river-all');
+  if (master) { master.checked = show; master.indeterminate = false; }
 }
 
-// ── Layer toggles ─────────────────────────────────────────────────────────────
-function toggleLayer(name) {
+// ── Raster layer toggles ──────────────────────────────────────────────────────
+function toggleRasterLayer(name) {
   const checked = document.getElementById('tog-' + name).checked;
-  const layer   = mainLayers[name];
+  const layer   = rasterLayers[name];
   if (!layer) return;
   if (checked) map.addLayer(layer);
   else         map.removeLayer(layer);
 }
 
+// ── Slider ────────────────────────────────────────────────────────────────────
+document.getElementById('acc-slider').addEventListener('input', function() {
+  document.getElementById('acc-val').textContent = this.value;
+  updateEffectLabel();
+  scheduleRiverRefresh();
+});
+function updateEffectLabel() {
+  const acc = parseInt(document.getElementById('acc-slider').value);
+  document.getElementById('acc-effect').textContent = '→ ' + (
+    acc < 300  ? 'Dense tributary network' :
+    acc < 1000 ? 'Moderate stream network' :
+    acc < 3000 ? 'Main rivers only' : 'Very sparse — major rivers only'
+  );
+}
+
 // ── Reset ─────────────────────────────────────────────────────────────────────
 function resetAll() {
-  clearResultLayers();
-  if (mainLayers.dem) { map.removeLayer(mainLayers.dem); mainLayers.dem = null; }
-  if (outletMarker)   { map.removeLayer(outletMarker);   outletMarker   = null; }
-  clickedLatLng = null;
-  demLoaded     = false;
+  // Remove outlet markers and catchment layers
+  outlets.forEach(o => {
+    if (o.marker)     map.removeLayer(o.marker);
+    if (o.catchLayer) map.removeLayer(o.catchLayer);
+  });
+  outlets = [];
+  renderOutletList();
+  fetch('/api/clear_results', { method:'POST' });
 
-  document.getElementById('download-btn').disabled         = true;
-  document.getElementById('run-btn').disabled              = true;
+  // Remove raster overlays
+  ['dem','acc','fdir'].forEach(k => {
+    if (rasterLayers[k]) { map.removeLayer(rasterLayers[k]); rasterLayers[k] = null; }
+  });
+
+  // Remove rivers and drawn polygon
+  clearRivers();
+  drawnItems.clearLayers();
+  drawnPolygon = null; drawnLayer = null; demLoaded = false; demBounds = null;
+
+  document.getElementById('download-btn').disabled = true;
   document.getElementById('dem-info').style.display        = 'none';
-  document.getElementById('results-section').style.display = 'none';
+  document.getElementById('polygon-info').style.display    = 'none';
+  document.getElementById('params-section').style.display  = 'none';
+  document.getElementById('raster-section').style.display  = 'none';
+  document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
-  document.getElementById('map-legend').style.display      = 'none';
-  document.getElementById('order-toggles').innerHTML       = '';
-  document.getElementById('tog-dem').checked               = true;
-  document.getElementById('instruction-text').textContent  =
-    'Click anywhere on the map to centre the download area.';
-  setStatus('Reset — click the map to place a new outlet point.', '');
-  map.setView([20, 0], 3);
+  document.getElementById('tog-dem').checked  = true;
+  document.getElementById('tog-acc').checked  = false;
+  document.getElementById('tog-fdir').checked = false;
+  document.getElementById('instruction-text').textContent =
+    'Use the polygon/rectangle tool (top-left of map) to draw your study area.';
+  setStatus('Reset — draw a polygon to start.', '');
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(name) {
+  document.getElementById('tab-analysis').style.display = name === 'analysis' ? '' : 'none';
+  document.getElementById('tab-method').style.display   = name === 'method'   ? '' : 'none';
+  document.getElementById('btn-tab-analysis').classList.toggle('active', name === 'analysis');
+  document.getElementById('btn-tab-method').classList.toggle('active',   name === 'method');
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
@@ -1543,32 +871,19 @@ function setStatus(msg, cls) {
   el.textContent = msg;
   el.className   = cls || '';
 }
-function showLoader(msg) {
-  document.getElementById('loader-text').textContent = msg || 'Processing…';
+function setLoader(text, detail) {
+  document.getElementById('loader-text').textContent   = text   || 'Processing…';
+  document.getElementById('loader-detail').textContent = detail || '';
   document.getElementById('loader').classList.add('on');
   document.getElementById('map').classList.add('wait');
 }
+function showLoader(msg) { setLoader(msg, ''); }
 function hideLoader() {
   document.getElementById('loader').classList.remove('on');
   document.getElementById('map').classList.remove('wait');
 }
 
-updateEffectLabels();
-
-// ── Tab switching ──────────────────────────────────────────────────────────────
-function switchTab(name) {
-  document.querySelectorAll('.tab-btn').forEach((b, i) => {
-    b.classList.toggle('active', ['analysis','docs'][i] === name);
-  });
-  document.getElementById('tab-analysis').classList.toggle('active', name === 'analysis');
-  document.getElementById('tab-docs').classList.toggle('active', name === 'docs');
-}
-
-// ── Doc accordion ─────────────────────────────────────────────────────────────
-function toggleDoc(btn) {
-  btn.classList.toggle('open');
-  btn.nextElementSibling.classList.toggle('open');
-}
+updateEffectLabel();
 </script>
 </body>
 </html>
