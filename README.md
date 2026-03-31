@@ -20,11 +20,10 @@ A browser-based watershed delineation tool. Draw a study area, download terrain 
 ## Features
 
 - D8 flow routing via **pysheds** (pit fill → depression fill → flat resolution → flow direction → accumulation)
-- **Segment-level Strahler ordering** — strict, consistent stream ordering with no cell-level artefacts
+- **Strahler ordering** — strict, consistent stream Strahler ordering
 - River polylines smoothed with **Chaikin corner-cutting**
-- Toggle DEM hillshade, flow accumulation, flow direction, and Strahler-order river layers independently
-- Upload external **Shapefiles** (ZIP) or **GeoJSON** files as overlay layers, with per-layer visibility toggle
-- Export includes catchments, outlets, rivers (vector) + DEM, flow accumulation, flow direction (raster GeoTIFFs) — all in **WGS84 (EPSG:4326)**
+- Upload external **Shapefiles** (ZIP) or **GeoJSON** files as overlay layers
+- Export  catchments, outlets, rivers (vector) + DEM, flow accumulation, flow direction (raster GeoTIFFs) — all in **WGS84 (EPSG:4326)**
 
 ---
 
@@ -44,18 +43,6 @@ export OPENTOPO_API_KEY=your_key_here
 
 ---
 
-## Deployment
-
-The app is configured for **Railway** (or any Docker host):
-
-```bash
-docker build -t catchment-delineation .
-docker run -p 8080:8080 -e OPENTOPO_API_KEY=your_key catchment-delineation
-```
-
-Railway auto-deploys on push to `master` via the included `Dockerfile`.
-
----
 
 ## Stack
 
