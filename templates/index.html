@@ -936,7 +936,7 @@ function handleShapefileUpload(input) {
           radius: 5, color, fillColor: color, fillOpacity: 0.7, weight: 1.5
         })
       }).addTo(map);
-      _uploadedLayers[name] = { layer, color };
+      _uploadedLayers[name] = { layer, color, visible: true };
       _renderUploadList();
       try { map.fitBounds(layer.getBounds()); } catch(e) {}
       _uploadMsg('"' + name + '" loaded (' + data.geojson.features.length + ' features)', 'var(--success)');
@@ -950,12 +950,24 @@ function _renderUploadList() {
   if (!names.length) { el.innerHTML = ''; return; }
   el.innerHTML = names.map(n => {
     const c = _uploadedLayers[n].color;
+    const vis = _uploadedLayers[n].visible;
+    const esc = n.replace(/'/g, "\\'");
     return `<div class="upload-layer-item">
-      <span class="upload-layer-dot" style="background:${c};"></span>
-      <span class="upload-layer-name" title="${n}">${n}</span>
-      <button class="upload-layer-rm" onclick="removeUploadedLayer('${n}')" title="Remove">&#x2715;</button>
+      <input type="checkbox" ${vis ? 'checked' : ''} onchange="toggleUploadedLayer('${esc}', this.checked)" style="margin:0;cursor:pointer;"/>
+      <span class="upload-layer-dot" style="background:${c}; opacity:${vis ? 1 : 0.35};"></span>
+      <span class="upload-layer-name" title="${n}" style="opacity:${vis ? 1 : 0.45};">${n}</span>
+      <button class="upload-layer-rm" onclick="removeUploadedLayer('${esc}')" title="Remove">&#x2715;</button>
     </div>`;
   }).join('');
+}
+
+function toggleUploadedLayer(name, show) {
+  const entry = _uploadedLayers[name];
+  if (!entry) return;
+  if (show) { map.addLayer(entry.layer); }
+  else       { map.removeLayer(entry.layer); }
+  entry.visible = show;
+  _renderUploadList();
 }
 
 function removeUploadedLayer(name) {

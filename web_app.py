@@ -1005,9 +1005,10 @@ def api_upload_shapefile():
                 read_path = shp_files[0]
                 layer_name = os.path.splitext(os.path.basename(read_path))[0]
             elif fname.endswith((".shp", ".geojson", ".json")):
-                read_path = os.path.join(td, f.filename)
+                safe_name = os.path.basename(f.filename).replace(" ", "_")
+                read_path = os.path.join(td, safe_name)
                 f.save(read_path)
-                layer_name = os.path.splitext(f.filename)[0]
+                layer_name = os.path.splitext(safe_name)[0]
             else:
                 return jsonify({"error": "Upload a ZIP (containing .shp) or a .shp / .geojson file"}), 400
             os.environ['SHAPE_RESTORE_SHX'] = 'YES'
