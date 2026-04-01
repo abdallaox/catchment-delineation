@@ -40,6 +40,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024   # 500 MB upload limit
 OPENTOPO_API_KEY = os.environ.get("OPENTOPO_API_KEY", "4e570ef4c138e88ff14c204a28aaf17e")
 OPENTOPO_URL     = "https://portal.opentopography.org/API/globaldem"
 TILE_DIR  = os.path.join(tempfile.gettempdir(), "catchment_dem_tiles")
@@ -758,52 +759,52 @@ def api_upload_dem():
             raw_path = os.path.join(td, "upload.tif")
             f.save(raw_path)
 
-            # Reproject to WGS84 if needed
             with rasterio.open(raw_path) as src:
-                src_crs = src.crs
+                src_crs    = src.crs
                 src_nodata = src.nodata
+                src_bounds = src.bounds
+                print(f"  Uploaded DEM: {src.width}×{src.height} px  dtype={src.dtypes[0]}  "
+                      f"nodata={src_nodata}  crs={src_crs}  bounds={src_bounds}")
 
-            if src_crs is None or src_crs.to_epsg() != 4326:
-                print(f"  Reprojecting uploaded DEM from {src_crs} → WGS84")
-                dst_crs = CRS.from_epsg(4326)
-                wgs_path = os.path.join(td, "upload_wgs84.tif")
-                with rasterio.open(raw_path) as src:
-                    tf_dst, w_dst, h_dst = calculate_default_transform(
-                        src_crs or CRS.from_epsg(32636),
-                        dst_crs, src.width, src.height, *src.bounds
-                    )
-                    meta = src.meta.copy()
-                    meta.update(crs=dst_crs, transform=tf_dst, width=w_dst,
-                                height=h_dst, nodata=NODATA, dtype="float32", count=1)
-                    with rasterio.open(wgs_path, "w", **meta) as dst:
-                        reproject(source=rasterio.band(src, 1),
-                                  destination=rasterio.band(dst, 1),
-                                  src_crs=src_crs or CRS.from_epsg(32636),
-                                  dst_crs=dst_crs,
-                                  src_nodata=src_nodata, dst_nodata=NODATA,
-                                  resampling=Resampling.bilinear)
-                raw_path = wgs_path
+            dst_crs = CRS.from_epsg(4326)
 
-            # Clip to polygon if one was provided
-            if polygon:
-                clipped_path = os.path.join(td, "upload_clipped.tif")
-                geom = shape(polygon)
-                with rasterio.open(raw_path) as src:
-                    masked, transform = rio_mask.mask(src, [geom], crop=True,
-                                                      nodata=NODATA, all_touched=True)
-                    meta = src.meta.copy()
-                meta.update(nodata=NODATA, dtype="float32",
-                            height=masked.shape[1], width=masked.shape[2], transform=transform)
-                with rasterio.open(clipped_path, "w", **meta) as dst:
-                    dst.write(masked[0:1].astype("float32"))
-                raw_path = clipped_path
+            # If no CRS, infer from bounds — geographic coords → assume WGS84
+            if src_crs is None:
+                if (-180 <= src_bounds.left <= 180 and -90 <= src_bounds.bottom <= 90):
+                    print("  No CRS — bounds look geographic, assuming WGS84")
+                    src_crs = dst_crs
+                else:
+                    return jsonify({"error":
+                        "Cannot determine CRS. Reproject to WGS84 (EPSG:4326) before uploading."}), 400
 
-            # Copy to persistent location before tempdir is cleaned up
+            # Always normalise to float32 / single-band / WGS84 / nodata=-9999.
+            # Using reproject even for same-CRS inputs avoids all WKT comparison
+            # pitfalls, multi-band files, Int16/nodata=0 edge-cases, etc.
+            norm_path = os.path.join(td, "upload_norm.tif")
+            print(f"  Normalising → WGS84 float32 …")
+            with rasterio.open(raw_path) as src:
+                tf_dst, w_dst, h_dst = calculate_default_transform(
+                    src_crs, dst_crs, src.width, src.height, *src.bounds)
+                meta = {"driver": "GTiff", "dtype": "float32", "nodata": NODATA,
+                        "width": w_dst, "height": h_dst, "count": 1, "crs": dst_crs,
+                        "transform": tf_dst}
+                with rasterio.open(norm_path, "w", **meta) as dst_f:
+                    reproject(source=rasterio.band(src, 1),
+                              destination=rasterio.band(dst_f, 1),
+                              src_crs=src_crs, dst_crs=dst_crs,
+                              src_nodata=src_nodata, dst_nodata=NODATA,
+                              resampling=Resampling.bilinear)
+
             persistent = os.path.join(TILE_DIR, "user_uploaded_dem.tif")
-            shutil.copy2(raw_path, persistent)
+            shutil.copy2(norm_path, persistent)
 
         _all_results.clear()
         load_and_condition(persistent)
+
+        if not _cache.get("valid_mask", np.array([])).any():
+            return jsonify({"error":
+                "DEM loaded but contains no valid elevation cells. "
+                "Check nodata values or try a different file."}), 400
 
         w   = _cache["bounds_wgs"]
         acc = _cache["acc_arr"]

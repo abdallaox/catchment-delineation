@@ -753,11 +753,20 @@ function uploadDEM(input) {
   const timers = msgs.map(([ms, txt, d]) => setTimeout(() => setLoader(txt, d), ms));
   const fd = new FormData();
   fd.append('file', file);
-  if (drawnPolygon) fd.append('polygon', JSON.stringify(drawnPolygon));
+  // Do not send the drawn polygon — uploaded DEM defines its own extent.
   fetch('/api/upload_dem', { method:'POST', body: fd })
-  .then(r => r.json())
-  .then(info => _handleDemResponse(info, timers, 'Source: ' + file.name))
-  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Upload error: '+e, 'error'); });
+  .then(r => r.json().then(data => ({ ok: r.ok, data })))
+  .then(({ ok, data }) => {
+    if (!ok || data.error) {
+      timers.forEach(clearTimeout); hideLoader();
+      const msg = data.error || 'Unknown server error';
+      setStatus('DEM error: ' + msg, 'error');
+      console.error('DEM upload trace:', data.trace || '(no trace)');
+      return;
+    }
+    _handleDemResponse(data, timers, 'Source: ' + file.name);
+  })
+  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Upload error: ' + e, 'error'); });
 }
 
 // ── River helpers ─────────────────────────────────────────────────────────────
