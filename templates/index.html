@@ -77,6 +77,10 @@
     .btn-download { background:#1a4a6e; color:var(--accent); border:1px solid #1e3d5c; }
     .btn-download:hover:not(:disabled) { background:#1e5a86; }
     .btn-download:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+    .btn-upload-dem { background:#1a3a4a; color:#7dd3fc; border:1px solid #1e4a5c; }
+    .btn-upload-dem:hover:not(:disabled) { background:#1e4a5e; }
+    .btn-upload-dem:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+    .dem-source-label { font-size:10px; color:var(--muted2); text-align:center; margin-top:4px; }
     .btn-gpkg { background:#1a5c38; color:#fff; margin-bottom:7px; }
     .btn-gpkg:hover { background:#1f7046; }
     .btn-shp  { background:var(--border); color:var(--accent); }
@@ -234,12 +238,21 @@
     </div>
   </div>
 
-  <!-- Step 2: Download DEM -->
+  <!-- Step 2: Download or Upload DEM -->
   <div class="section">
-    <div class="sec-title">Step 2 — Download &amp; process terrain</div>
-    <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
-      &#8659;&nbsp; Download SRTM DEM
-    </button>
+    <div class="sec-title">Step 2 — Load terrain</div>
+    <input type="file" id="dem-file-input" accept=".tif,.tiff" style="display:none;"
+           onchange="uploadDEM(this)"/>
+    <div class="btn-row">
+      <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
+        &#8659;&nbsp; Download SRTM
+      </button>
+      <button id="upload-dem-btn" class="btn btn-upload-dem"
+              onclick="document.getElementById('dem-file-input').click()">
+        &#8679;&nbsp; Upload DEM
+      </button>
+    </div>
+    <div class="dem-source-label" id="dem-source-label"></div>
     <div id="dem-info" style="display:none; margin-top:10px;">
       <div class="stat-grid">
         <div class="stat-card"><div class="lbl">Resolution</div><div class="val" id="dem-res-val" style="font-size:14px;">—</div></div>
@@ -620,11 +633,8 @@ function clearAllOutlets() {
   resetAll();
 }
 
-// ── Download DEM ──────────────────────────────────────────────────────────────
-function downloadDEM() {
-  if (!drawnPolygon) return;
-
-  // Clear any previous analysis (outlets, rasters, rivers) but keep the drawn polygon
+// ── DEM helpers ───────────────────────────────────────────────────────────────
+function _clearPreviousDEM() {
   outlets.forEach(o => {
     if (o.marker)     map.removeLayer(o.marker);
     if (o.catchLayer) map.removeLayer(o.catchLayer);
@@ -645,87 +655,109 @@ function downloadDEM() {
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
+}
 
-  setLoader('Connecting to OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
+function _handleDemResponse(info, timers, sourceLabel) {
+  timers.forEach(clearTimeout);
+  hideLoader();
+  if (info.error) { setStatus('DEM error: ' + info.error, 'error'); return; }
 
-  // Timed progress messages
-  const msgs = [
-    [3000,  'Downloading SRTM tile(s)…',         'This may take a moment for large areas'],
-    [9000,  'Conditioning DEM…',                  'Filling pits and depressions (pysheds)'],
-    [16000, 'Computing flow direction…',           'D8 routing across every cell'],
-    [22000, 'Computing flow accumulation…',        'Counting upstream contributing cells'],
-    [30000, 'Extracting river network…',           'Tracing streams, computing Strahler orders'],
-  ];
-  const timers = msgs.map(([ms, txt, detail]) =>
-    setTimeout(() => setLoader(txt, detail), ms)
+  demLoaded = true;
+  const b = info.bounds;
+  demBounds = [[b.south, b.west], [b.north, b.east]];
+
+  if (rasterLayers.dem) map.removeLayer(rasterLayers.dem);
+  rasterLayers.dem = L.imageOverlay(
+    '/api/dem_preview.png?' + Date.now(), demBounds,
+    { opacity:1.0, interactive:false, pane:'demPane' }
+  ).addTo(map);
+  document.getElementById('tog-dem').checked = true;
+
+  if (rasterLayers.acc) map.removeLayer(rasterLayers.acc);
+  rasterLayers.acc = L.imageOverlay(
+    '/api/acc_image?' + Date.now(), demBounds,
+    { opacity:1.0, interactive:false, pane:'accPane' }
   );
+  document.getElementById('tog-acc').checked = false;
 
+  if (rasterLayers.fdir) map.removeLayer(rasterLayers.fdir);
+  rasterLayers.fdir = L.imageOverlay(
+    '/api/fdir_image?' + Date.now(), demBounds,
+    { opacity:1.0, interactive:false, pane:'fdirPane' }
+  );
+  document.getElementById('tog-fdir').checked = false;
+
+  map.fitBounds(demBounds, { padding:[20,20] });
+
+  const p95 = Math.round(info.acc_p95 / 50) * 50;
+  document.getElementById('acc-slider').value = p95;
+  document.getElementById('acc-val').textContent = p95;
+  updateEffectLabel();
+
+  if (info.rivers && info.rivers.features.length) {
+    clearRivers();
+    buildOrderLayers(info.rivers);
+  }
+
+  document.getElementById('dem-res-val').textContent = info.res_m + ' m';
+  document.getElementById('dem-source-label').textContent = sourceLabel || '';
+  document.getElementById('dem-info').style.display        = 'block';
+  document.getElementById('params-section').style.display  = 'block';
+  document.getElementById('raster-section').style.display  = 'block';
+  document.getElementById('outlets-section').style.display = 'block';
+
+  document.getElementById('instruction-text').textContent =
+    `DEM ready (${info.res_m} m). Click on a stream to place an outlet and delineate its catchment.`;
+  setStatus(
+    `✓ DEM loaded · ${info.res_m} m · ${info.rivers ? info.rivers.features.length : 0} river segments · click a stream to delineate`,
+    'ok'
+  );
+}
+
+// ── Download DEM ──────────────────────────────────────────────────────────────
+function downloadDEM() {
+  if (!drawnPolygon) return;
+  _clearPreviousDEM();
+  setLoader('Connecting to OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
+  const msgs = [
+    [3000,  'Downloading SRTM tile(s)…',        'This may take a moment for large areas'],
+    [9000,  'Conditioning DEM…',                 'Filling pits and depressions (pysheds)'],
+    [16000, 'Computing flow direction…',          'D8 routing across every cell'],
+    [22000, 'Computing flow accumulation…',       'Counting upstream contributing cells'],
+    [30000, 'Extracting river network…',          'Tracing streams, computing Strahler orders'],
+  ];
+  const timers = msgs.map(([ms, txt, d]) => setTimeout(() => setLoader(txt, d), ms));
   fetch('/api/fetch_dem', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ polygon: drawnPolygon }),
   })
   .then(r => r.json())
-  .then(info => {
-    timers.forEach(clearTimeout);
-    hideLoader();
-    if (info.error) { setStatus('DEM error: '+info.error, 'error'); return; }
-
-    demLoaded = true;
-    const b   = info.bounds;
-    demBounds = [[b.south, b.west], [b.north, b.east]];
-
-    // DEM terrain overlay
-    if (rasterLayers.dem) map.removeLayer(rasterLayers.dem);
-    rasterLayers.dem = L.imageOverlay(
-      '/api/dem_preview.png?' + Date.now(), demBounds,
-      { opacity:1.0, interactive:false, pane:'demPane' }
-    ).addTo(map);
-    document.getElementById('tog-dem').checked = true;
-
-    // Flow accumulation overlay (not shown by default)
-    if (rasterLayers.acc) map.removeLayer(rasterLayers.acc);
-    rasterLayers.acc = L.imageOverlay(
-      '/api/acc_image?' + Date.now(), demBounds,
-      { opacity:1.0, interactive:false, pane:'accPane' }
-    ); // NOT added to map yet — toggle is off
-    document.getElementById('tog-acc').checked = false;
-
-    // Flow direction overlay (not shown by default)
-    if (rasterLayers.fdir) map.removeLayer(rasterLayers.fdir);
-    rasterLayers.fdir = L.imageOverlay(
-      '/api/fdir_image?' + Date.now(), demBounds,
-      { opacity:1.0, interactive:false, pane:'fdirPane' }
-    ); // NOT added to map yet — toggle is off
-    document.getElementById('tog-fdir').checked = false;
-
-    map.fitBounds(demBounds, { padding:[20,20] });
-
-    // Accumulation threshold
-    const p95 = Math.round(info.acc_p95 / 50) * 50;
-    document.getElementById('acc-slider').value = p95;
-    document.getElementById('acc-val').textContent = p95;
-    updateEffectLabel();
-
-    // River network
-    if (info.rivers && info.rivers.features.length) {
-      clearRivers();
-      buildOrderLayers(info.rivers);
-    }
-
-    document.getElementById('dem-res-val').textContent = info.res_m + ' m';
-    document.getElementById('dem-info').style.display   = 'block';
-    document.getElementById('params-section').style.display  = 'block';
-    document.getElementById('raster-section').style.display  = 'block';
-    document.getElementById('outlets-section').style.display = 'block';
-
-    document.getElementById('instruction-text').textContent =
-      `DEM ready (${info.res_m} m). Click on a stream to place an outlet and delineate its catchment.`;
-    setStatus(
-      `✓ DEM loaded · ${info.res_m} m · ${info.rivers ? info.rivers.features.length : 0} river segments · click a stream to delineate`,
-      'ok'
-    );
-  })
+  .then(info => _handleDemResponse(info, timers, 'Source: OpenTopography SRTM GL1 (30 m)'))
   .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Network error: '+e, 'error'); });
+}
+
+// ── Upload DEM ────────────────────────────────────────────────────────────────
+function uploadDEM(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = '';
+  _clearPreviousDEM();
+  setLoader('Reading uploaded DEM…', file.name);
+  const msgs = [
+    [3000,  'Reprojecting to WGS84 if needed…',  'Checking coordinate reference system'],
+    [8000,  'Conditioning DEM…',                  'Filling pits and depressions (pysheds)'],
+    [15000, 'Computing flow direction…',           'D8 routing across every cell'],
+    [21000, 'Computing flow accumulation…',        'Counting upstream contributing cells'],
+    [28000, 'Extracting river network…',           'Tracing streams, computing Strahler orders'],
+  ];
+  const timers = msgs.map(([ms, txt, d]) => setTimeout(() => setLoader(txt, d), ms));
+  const fd = new FormData();
+  fd.append('file', file);
+  if (drawnPolygon) fd.append('polygon', JSON.stringify(drawnPolygon));
+  fetch('/api/upload_dem', { method:'POST', body: fd })
+  .then(r => r.json())
+  .then(info => _handleDemResponse(info, timers, 'Source: ' + file.name))
+  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Upload error: '+e, 'error'); });
 }
 
 // ── River helpers ─────────────────────────────────────────────────────────────

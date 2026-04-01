@@ -12,7 +12,7 @@ Environment variables:
     OPENTOPO_API_KEY  — OpenTopography API key (fallback to hard-coded key)
 """
 
-import os, sys, io, json, math, zipfile, tempfile, warnings, traceback
+import os, sys, io, json, math, zipfile, tempfile, warnings, traceback, shutil
 import numpy as np
 import rasterio
 import rasterio.features
@@ -736,6 +736,88 @@ def api_fetch_dem():
             "acc_p95":     p95,
             "default_acc": default_acc,
             "rivers":      rivers,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/upload_dem", methods=["POST"])
+def api_upload_dem():
+    """Accept a user-supplied GeoTIFF, reproject to WGS84 if needed, run same pipeline."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+
+    polygon_str = request.form.get("polygon")
+    polygon = json.loads(polygon_str) if polygon_str else None
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            raw_path = os.path.join(td, "upload.tif")
+            f.save(raw_path)
+
+            # Reproject to WGS84 if needed
+            with rasterio.open(raw_path) as src:
+                src_crs = src.crs
+                src_nodata = src.nodata
+
+            if src_crs is None or src_crs.to_epsg() != 4326:
+                print(f"  Reprojecting uploaded DEM from {src_crs} → WGS84")
+                dst_crs = CRS.from_epsg(4326)
+                wgs_path = os.path.join(td, "upload_wgs84.tif")
+                with rasterio.open(raw_path) as src:
+                    tf_dst, w_dst, h_dst = calculate_default_transform(
+                        src_crs or CRS.from_epsg(32636),
+                        dst_crs, src.width, src.height, *src.bounds
+                    )
+                    meta = src.meta.copy()
+                    meta.update(crs=dst_crs, transform=tf_dst, width=w_dst,
+                                height=h_dst, nodata=NODATA, dtype="float32", count=1)
+                    with rasterio.open(wgs_path, "w", **meta) as dst:
+                        reproject(source=rasterio.band(src, 1),
+                                  destination=rasterio.band(dst, 1),
+                                  src_crs=src_crs or CRS.from_epsg(32636),
+                                  dst_crs=dst_crs,
+                                  src_nodata=src_nodata, dst_nodata=NODATA,
+                                  resampling=Resampling.bilinear)
+                raw_path = wgs_path
+
+            # Clip to polygon if one was provided
+            if polygon:
+                clipped_path = os.path.join(td, "upload_clipped.tif")
+                geom = shape(polygon)
+                with rasterio.open(raw_path) as src:
+                    masked, transform = rio_mask.mask(src, [geom], crop=True,
+                                                      nodata=NODATA, all_touched=True)
+                    meta = src.meta.copy()
+                meta.update(nodata=NODATA, dtype="float32",
+                            height=masked.shape[1], width=masked.shape[2], transform=transform)
+                with rasterio.open(clipped_path, "w", **meta) as dst:
+                    dst.write(masked[0:1].astype("float32"))
+                raw_path = clipped_path
+
+            # Copy to persistent location before tempdir is cleaned up
+            persistent = os.path.join(TILE_DIR, "user_uploaded_dem.tif")
+            shutil.copy2(raw_path, persistent)
+
+        _all_results.clear()
+        load_and_condition(persistent)
+
+        w   = _cache["bounds_wgs"]
+        acc = _cache["acc_arr"]
+        p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
+        default_acc = int(round(p95 / 50) * 50)
+        rivers = extract_rivers_global(default_acc)
+        return jsonify({
+            "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
+            "res_m":       round(abs(_cache["affine"].a) * 111320, 1),
+            "shape":       list(_cache["shape"]),
+            "acc_p95":     p95,
+            "default_acc": default_acc,
+            "rivers":      rivers,
+            "source":      "upload",
         })
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
