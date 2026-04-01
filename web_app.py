@@ -447,6 +447,44 @@ def _get_strahler(acc_threshold):
     return sc[acc_threshold]
 
 
+MAX_RIVER_SEGMENTS = 3000   # cap to keep browser responsive
+MAX_DEM_CELLS = 8_000_000  # ~2800×2800 px — larger DEMs are too slow for Python loops
+
+def _estimate_threshold(target_stream_cells=45_000):
+    """Binary-search for a threshold that gives ~target_stream_cells stream cells.
+    Much faster than building the full network repeatedly."""
+    acc = _cache["acc_arr"]
+    valid = _cache.get("valid_mask")
+    lo, hi = 1, int(acc.max())
+    for _ in range(20):
+        mid = (lo + hi) // 2
+        count = int((acc[valid] >= mid).sum()) if valid is not None else int((acc >= mid).sum())
+        if count > target_stream_cells:
+            lo = mid + 1
+        else:
+            hi = mid
+    return max(lo, 50)
+
+def _auto_threshold(initial):
+    """Pick a threshold that keeps segment count under MAX_RIVER_SEGMENTS."""
+    nrows, ncols = _cache["shape"]
+    n_cells = nrows * ncols
+    if n_cells > MAX_DEM_CELLS:
+        # For very large DEMs estimate threshold from stream-cell count alone —
+        # avoids building the network (slow Python loop) multiple times.
+        threshold = _estimate_threshold(target_stream_cells=40_000)
+        print(f"  Large DEM ({n_cells} cells) — estimated threshold={threshold}")
+    else:
+        threshold = initial
+    rivers = extract_rivers_global(threshold)
+    # If still over budget, double until within limit (fast for small DEMs)
+    for _ in range(8):
+        if len(rivers["features"]) <= MAX_RIVER_SEGMENTS:
+            break
+        threshold = int(threshold * 2)
+        rivers = extract_rivers_global(threshold)
+    return threshold, rivers
+
 def extract_rivers_global(acc_threshold):
     if not _cache:
         return {"type": "FeatureCollection", "features": []}
@@ -729,7 +767,7 @@ def api_fetch_dem():
         acc = _cache["acc_arr"]
         p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
         default_acc = int(round(p95 / 50) * 50)
-        rivers = extract_rivers_global(default_acc)
+        default_acc, rivers = _auto_threshold(default_acc)
         return jsonify({
             "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
             "res_m":       round(abs(_cache["affine"].a) * 111320, 1),
@@ -780,6 +818,15 @@ def api_upload_dem():
             # Always normalise to float32 / single-band / WGS84 / nodata=-9999.
             # Using reproject even for same-CRS inputs avoids all WKT comparison
             # pitfalls, multi-band files, Int16/nodata=0 edge-cases, etc.
+            # Warn early for very large DEMs (reprojection will still run but
+            # the user gets a heads-up that processing will be slow)
+            with rasterio.open(raw_path) as src:
+                approx_cells = src.width * src.height
+            if approx_cells > 50_000_000:
+                return jsonify({"error":
+                    f"DEM is too large ({approx_cells//1_000_000} M cells). "
+                    "Clip to your study area in QGIS first, then re-upload."}), 400
+
             norm_path = os.path.join(td, "upload_norm.tif")
             print(f"  Normalising → WGS84 float32 …")
             with rasterio.open(raw_path) as src:
@@ -810,7 +857,7 @@ def api_upload_dem():
         acc = _cache["acc_arr"]
         p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
         default_acc = int(round(p95 / 50) * 50)
-        rivers = extract_rivers_global(default_acc)
+        default_acc, rivers = _auto_threshold(default_acc)
         return jsonify({
             "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
             "res_m":       round(abs(_cache["affine"].a) * 111320, 1),

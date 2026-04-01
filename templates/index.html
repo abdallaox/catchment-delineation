@@ -742,6 +742,8 @@ function uploadDEM(input) {
   if (!file) return;
   input.value = '';
   _clearPreviousDEM();
+  const _lbl = document.getElementById('dem-source-label');
+  _lbl.textContent = ''; _lbl.style.color = '';
   setLoader('Reading uploaded DEM…', file.name);
   const msgs = [
     [3000,  'Reprojecting to WGS84 if needed…',  'Checking coordinate reference system'],
@@ -760,7 +762,10 @@ function uploadDEM(input) {
     if (!ok || data.error) {
       timers.forEach(clearTimeout); hideLoader();
       const msg = data.error || 'Unknown server error';
-      setStatus('DEM error: ' + msg, 'error');
+      const lbl = document.getElementById('dem-source-label');
+      lbl.textContent = '⚠ ' + msg;
+      lbl.style.color = 'var(--error)';
+      lbl.style.whiteSpace = 'normal';
       console.error('DEM upload trace:', data.trace || '(no trace)');
       return;
     }
