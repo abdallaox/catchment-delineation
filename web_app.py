@@ -1003,6 +1003,14 @@ def api_clear_results():
     return jsonify({"ok": True})
 
 
+@app.route("/api/remove_result", methods=["POST"])
+def api_remove_result():
+    idx = (request.json or {}).get("idx", -1)
+    if 0 <= idx < len(_all_results):
+        _all_results.pop(idx)
+    return jsonify({"ok": True})
+
+
 def _write_raster_tif(arr, dtype, nodata, path):
     """Write a 2-D numpy array to a GeoTIFF using cached affine/CRS."""
     affine = _cache["affine"]

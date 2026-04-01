@@ -619,12 +619,15 @@ function removeOutlet(id) {
   const idx = outlets.findIndex(o => o.id === id);
   if (idx < 0) return;
   const o = outlets[idx];
+  // Remove just this result from server (not all results)
+  fetch('/api/remove_result', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ idx })
+  });
   if (o.marker)     map.removeLayer(o.marker);
   if (o.catchLayer) map.removeLayer(o.catchLayer);
   outlets.splice(idx, 1);
   renderOutletList();
-  // Sync with server
-  fetch('/api/clear_results', { method:'POST' });
   if (!outlets.length) document.getElementById('export-section').style.display = 'none';
   setStatus('Outlet #'+id+' removed.', '');
 }
