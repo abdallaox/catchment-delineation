@@ -320,6 +320,20 @@ def load_and_condition(dem_path):
     fdir_arr[~valid_mask] = 0
     acc_arr[~valid_mask]  = 0
 
+    # Explicitly release old large objects before overwriting the cache.
+    # pysheds Grid keeps file handles open on Windows; dropping it here
+    # ensures the old _walled.tif is not locked when reused on next download.
+    import gc
+    _cache.pop("ps_grid",  None)
+    _cache.pop("ps_fdir",  None)
+    _cache.pop("dem_arr",  None)
+    _cache.pop("fdir_arr", None)
+    _cache.pop("acc_arr",  None)
+    _cache.pop("valid_mask", None)
+    _cache.pop("strahler_cache", None)
+    _cache.pop("rivers_cache",   None)
+    gc.collect()
+
     _cache.clear()
     _cache.update(
         dem_arr=raw, affine=affine, crs=crs,
@@ -448,37 +462,42 @@ def _get_strahler(acc_threshold):
 
 
 MAX_RIVER_SEGMENTS = 3000   # cap to keep browser responsive
-MAX_DEM_CELLS = 8_000_000  # ~2800×2800 px — larger DEMs are too slow for Python loops
-
-def _estimate_threshold(target_stream_cells=45_000):
-    """Binary-search for a threshold that gives ~target_stream_cells stream cells.
-    Much faster than building the full network repeatedly."""
-    acc = _cache["acc_arr"]
-    valid = _cache.get("valid_mask")
-    lo, hi = 1, int(acc.max())
-    for _ in range(20):
-        mid = (lo + hi) // 2
-        count = int((acc[valid] >= mid).sum()) if valid is not None else int((acc >= mid).sum())
-        if count > target_stream_cells:
-            lo = mid + 1
-        else:
-            hi = mid
-    return max(lo, 50)
 
 def _auto_threshold(initial):
-    """Pick a threshold that keeps segment count under MAX_RIVER_SEGMENTS."""
-    nrows, ncols = _cache["shape"]
-    n_cells = nrows * ncols
-    if n_cells > MAX_DEM_CELLS:
-        # For very large DEMs estimate threshold from stream-cell count alone —
-        # avoids building the network (slow Python loop) multiple times.
-        threshold = _estimate_threshold(target_stream_cells=40_000)
-        print(f"  Large DEM ({n_cells} cells) — estimated threshold={threshold}")
-    else:
-        threshold = initial
-    rivers = extract_rivers_global(threshold)
-    # If still over budget, double until within limit (fast for small DEMs)
-    for _ in range(8):
+    """Pick a threshold that keeps segment count under MAX_RIVER_SEGMENTS.
+    Uses binary search on stream-cell count to avoid building the full network
+    repeatedly — only builds once at the estimated threshold."""
+    acc  = _cache["acc_arr"]
+    valid = _cache.get("valid_mask")
+
+    def stream_cells(t):
+        mask = acc >= t
+        if valid is not None:
+            mask &= valid
+        return int(mask.sum())
+
+    # Target stream cell count that empirically gives ~MAX_RIVER_SEGMENTS segments
+    # (avg segment length ≈ 12-15 cells)
+    target_cells = MAX_RIVER_SEGMENTS * 12
+
+    # Binary search for threshold that gives ≈ target_cells stream cells
+    lo, hi = initial, max(initial, int(acc.max()))
+    # Only search if the initial threshold already has too many cells
+    if stream_cells(initial) > target_cells:
+        for _ in range(20):
+            if hi - lo <= 1:
+                break
+            mid = (lo + hi) // 2
+            if stream_cells(mid) > target_cells:
+                lo = mid
+            else:
+                hi = mid
+        initial = hi
+
+    rivers = extract_rivers_global(initial)
+    # Safety: if still over budget double the threshold (cached, so cheap)
+    threshold = initial
+    for _ in range(6):
         if len(rivers["features"]) <= MAX_RIVER_SEGMENTS:
             break
         threshold = int(threshold * 2)
