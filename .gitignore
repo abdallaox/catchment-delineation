@@ -23,6 +23,11 @@ outputs/
 catchment_results*
 cwi_results*
 
+# CV / personal documents
+*.docx
+*.doc
+*.pdf
+
 # OS
 .DS_Store
 Thumbs.db

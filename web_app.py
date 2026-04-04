@@ -57,16 +57,62 @@ DELTA_TO_DIR = {v: k for k, v in D8_DELTAS.items()}
 _cache       = {}   # Conditioned DEM + fdir/acc arrays
 _all_results = []   # All delineation results, one per outlet placed
 
+# ── Naturalearth countries cache (downloaded once per process) ─────────────────
+_NE_COUNTRIES_CACHE = os.path.join(os.path.dirname(__file__), "data", "ne_110m_countries.geojson")
+_NE_COUNTRIES_URL   = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector"
+                        "/master/geojson/ne_110m_admin_0_countries.geojson")
+
+def _ensure_ne_countries():
+    """Return path to cached NE 110m countries GeoJSON, downloading if needed."""
+    if os.path.exists(_NE_COUNTRIES_CACHE):
+        return _NE_COUNTRIES_CACHE
+    try:
+        os.makedirs(os.path.dirname(_NE_COUNTRIES_CACHE), exist_ok=True)
+        r = requests.get(_NE_COUNTRIES_URL, timeout=20)
+        if r.status_code == 200:
+            with open(_NE_COUNTRIES_CACHE, "wb") as f:
+                f.write(r.content)
+            print("  [NE] countries cached to", _NE_COUNTRIES_CACHE)
+            return _NE_COUNTRIES_CACHE
+    except Exception as e:
+        print(f"  [NE] download failed: {e}")
+    return None
+
+# ── Real-time progress (polled by /api/dem_progress) ───────────────────────────
+_dem_progress = {"stage": "", "detail": "", "pct": 0, "source": "", "fallback_reason": "", "error": None, "done": False}
+
+def _emit(stage, detail="", pct=0):
+    """Update the progress store — readable by the frontend via polling."""
+    _dem_progress.update({"stage": stage, "detail": detail,
+                          "pct": int(pct), "error": None, "done": False})
+    print(f"  [{int(pct):3d}%] {stage}" + (f" — {detail}" if detail else ""))
+
+def _emit_source(label):
+    """Record which DEM source is being used — shown as a badge in the overlay."""
+    _dem_progress["source"] = label
+    print(f"  [source] {label}")
+
+def _emit_error(msg):
+    _dem_progress.update({"stage": "Error", "detail": msg,
+                          "error": msg, "done": True})
+    print(f"  [ERR] {msg}")
+
+def _emit_done(summary=""):
+    _dem_progress.update({"stage": "Complete", "detail": summary,
+                          "pct": 100, "error": None, "done": True})
+    print(f"  [100%] Done — {summary}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DEM DOWNLOAD  —  SRTM GL1 (30 m) via OpenTopography
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _download_srtm_chunk(south, north, west, east):
+    """Returns (path, error_reason). path is None on failure."""
     key  = f"srtm_{south:.5f}_{north:.5f}_{west:.5f}_{east:.5f}"
     path = os.path.join(TILE_DIR, f"{key}.tif")
     if os.path.exists(path) and os.path.getsize(path) > 1000:
-        return path
+        return path, None
     params = {
         "demtype": "SRTMGL1", "south": round(south,6), "north": round(north,6),
         "west": round(west,6), "east": round(east,6),
@@ -77,11 +123,17 @@ def _download_srtm_chunk(south, north, west, east):
         if r.status_code == 200:
             with open(path, "wb") as f:
                 f.write(r.content)
-            return path
-        print(f"  OpenTopography error {r.status_code}: {r.text[:300]}")
+            return path, None
+        reason = f"HTTP {r.status_code}"
+        body = r.text.strip()[:200]
+        if body:
+            reason += f" — {body}"
+        print(f"  OpenTopography error: {reason}")
+        return None, reason
     except Exception as e:
-        print(f"  SRTM chunk download error: {e}")
-    return None
+        reason = str(e)
+        print(f"  SRTM chunk download error: {reason}")
+        return None, reason
 
 
 def fetch_dem_bbox(south, north, west, east):
@@ -92,15 +144,27 @@ def fetch_dem_bbox(south, north, west, east):
     lon_edges = list(np.arange(west,  east,  CHUNK)) + [east]
     chunks = [(lat_edges[i], lat_edges[i+1], lon_edges[j], lon_edges[j+1])
               for i in range(len(lat_edges)-1) for j in range(len(lon_edges)-1)]
-    print(f"  Trying OpenTopography SRTM GL1 — {len(chunks)} chunk(s)…")
-    paths = [_download_srtm_chunk(s, n, w, e) for (s, n, w, e) in chunks]
-    paths = [p for p in paths if p]
-
+    n_chunks = len(chunks)
+    _emit("Contacting OpenTopography…",
+          f"SRTM GL1 (30 m) — {n_chunks} tile(s) to download", pct=2)
+    _emit_source("OpenTopography SRTM GL1 (30 m)")
+    paths = []
+    srtm_errors = []
+    for i, (s, n, w, e) in enumerate(chunks):
+        pct_tile = 2 + int(16 * i / n_chunks)
+        _emit(f"Downloading SRTM tile {i+1}/{n_chunks}…",
+              f"OpenTopography — chunk {i+1} of {n_chunks}", pct=pct_tile)
+        p, err = _download_srtm_chunk(s, n, w, e)
+        if p:
+            paths.append(p)
+        elif err:
+            srtm_errors.append(err)
+    # Final tile done → 18 %
     if paths:
         # OpenTopography succeeded
         if len(paths) == 1:
             return paths[0]
-        print(f"  Mosaicing {len(paths)} chunks…")
+        _emit("Mosaicing tiles…", f"Merging {len(paths)} SRTM chunks", pct=18)
         datasets = [rasterio.open(p) for p in paths]
         mosaic, mosaic_tf = rio_merge(datasets, nodata=NODATA)
         meta = datasets[0].meta.copy()
@@ -118,7 +182,11 @@ def fetch_dem_bbox(south, north, west, east):
         return out
 
     # ── Fallback: AWS Terrain Tiles (GeoTIFF, no API key required) ───────────
-    print("  OpenTopography unavailable — falling back to AWS Terrain Tiles…")
+    fallback_reason = srtm_errors[0] if srtm_errors else "No tiles returned"
+    _dem_progress["fallback_reason"] = fallback_reason
+    _emit("OpenTopography unavailable — switching to AWS",
+          f"Reason: {fallback_reason[:120]}", pct=3)
+    _emit_source("AWS Terrain Tiles (~76 m) — OpenTopography unavailable")
     return _fetch_dem_aws(south, north, west, east)
 
 
@@ -172,18 +240,24 @@ def _fetch_dem_aws(south, north, west, east):
     x1 = min(x1, x0 + 9); y1 = min(y1, y0 + 9)
 
     n_tiles = (x1 - x0 + 1) * (y1 - y0 + 1)
-    print(f"  AWS tiles: zoom={zoom}, grid={x1-x0+1}×{y1-y0+1} ({n_tiles} tiles)…")
+    _emit("Downloading AWS terrain tiles…",
+          f"Zoom {zoom} — {x1-x0+1}×{y1-y0+1} grid ({n_tiles} tile(s))", pct=5)
 
     tile_paths = []
+    done = 0
     for xi in range(x0, x1 + 1):
         for yi in range(y0, y1 + 1):
+            pct_tile = 5 + int(13 * done / n_tiles)
+            _emit(f"Downloading AWS tile {done+1}/{n_tiles}…",
+                  f"Zoom {zoom} — tile ({xi},{yi})", pct=pct_tile)
             p = _download_aws_tile(zoom, xi, yi)
             if p:
                 tile_paths.append(p)
+            done += 1
 
     if not tile_paths:
-        raise RuntimeError("Failed to download DEM from both OpenTopography and AWS Terrain Tiles. "
-                           "Check your internet connection.")
+        raise RuntimeError("Could not download elevation data from OpenTopography or AWS. "
+                           "Check your internet connection and try again.")
 
     # Merge tiles
     datasets = [rasterio.open(p) for p in tile_paths]
@@ -257,7 +331,7 @@ def clip_dem_to_polygon(dem_path, polygon_geojson):
 def load_and_condition(dem_path):
     """Read, condition, and fully cache the DEM with a walled pysheds run."""
     global _cache
-    print(f"  Conditioning: {os.path.basename(dem_path)}")
+    _emit("Reading DEM…", os.path.basename(dem_path), pct=22)
 
     with rasterio.open(dem_path) as src:
         raw    = src.read(1).astype(float)
@@ -289,12 +363,19 @@ def load_and_condition(dem_path):
     # valid_mask: True only inside the drawn polygon (non-NaN cells)
     valid_mask = np.isfinite(raw)
     n_valid = int(valid_mask.sum())
-    print(f"  Valid cells: {n_valid}/{raw.size}  "
-          f"elev {np.nanmin(raw):.1f}–{np.nanmax(raw):.1f} m")
+    elev_info = (f"{np.nanmin(raw):.0f} – {np.nanmax(raw):.0f} m"
+                 if n_valid > 0 else "no valid data")
+    print(f"  Valid cells: {n_valid}/{raw.size}  elev {elev_info}")
+
+    if n_valid == 0:
+        raise RuntimeError("No valid elevation data found in the selected area. "
+                           "Try a different location or a larger polygon.")
 
     # Wall DEM: outside polygon cells → very high elevation so pysheds
     # can't route flow through them, preventing catchment leakage.
-    wall_elev = float(np.nanmax(raw)) + 5000.0 if n_valid > 0 else 5000.0
+    _emit("Conditioning DEM…",
+          f"{nrows}×{ncols} cells · elevation {elev_info}", pct=28)
+    wall_elev = float(np.nanmax(raw)) + 5000.0
     dem_walled = np.where(valid_mask, raw, wall_elev)
 
     walled_path = dem_path.replace(".tif", "_walled.tif")
@@ -304,13 +385,21 @@ def load_and_condition(dem_path):
     with rasterio.open(walled_path, "w", **meta_w) as dst:
         dst.write(dem_walled.astype("float32")[np.newaxis])
 
-    print("  Running pysheds: pit fill → depression fill → flat resolve → fdir → acc…")
+    _emit("Filling pits…", "Removing single-cell sinks (pysheds)", pct=34)
     grid    = Grid.from_raster(walled_path)
     dem_ps  = grid.read_raster(walled_path)
     pit     = grid.fill_pits(dem_ps)
+
+    _emit("Filling depressions…", "Removing enclosed basins — may take a moment for large areas", pct=44)
     dep     = grid.fill_depressions(pit)
+
+    _emit("Resolving flat areas…", "Adding gradient to flat cells so flow can route through them", pct=64)
     flat    = grid.resolve_flats(dep)
+
+    _emit("Computing flow direction…", "D8 routing — assigning each cell to 1 of 8 neighbours", pct=74)
     fdir_ps = grid.flowdir(flat, dirmap=D8_DIRMAP)
+
+    _emit("Computing flow accumulation…", "Counting upstream contributing cells for every pixel", pct=83)
     acc_ps  = grid.accumulation(fdir_ps, dirmap=D8_DIRMAP)
 
     fdir_arr = np.array(fdir_ps).astype(np.int32)
@@ -719,6 +808,187 @@ def delineate(lat, lon, acc_threshold):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  PRINT MAP HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _pm_north_arrow(ax):
+    """Clean north arrow drawn in its own inset axes (immune to aspect-ratio distortion)."""
+    # Inset in top-right, 8 % wide × 12 % tall of main axes
+    ax_na = ax.inset_axes([0.886, 0.855, 0.096, 0.130])
+    ax_na.set_xlim(-1, 1)
+    ax_na.set_ylim(-1.2, 1.2)
+    ax_na.set_aspect("equal")
+    ax_na.axis("off")
+    ax_na.patch.set_facecolor("white")
+    ax_na.patch.set_edgecolor("#aaa")
+    ax_na.patch.set_linewidth(0.7)
+
+    # Upper half of arrow = black filled triangle (north)
+    ax_na.fill([0, -0.55, 0.55], [1.0, 0.0, 0.0], color="#1a2030", zorder=2)
+    # Lower half = white filled triangle (south)
+    ax_na.fill([0, -0.55, 0.55], [-1.0, 0.0, 0.0],
+               color="white", zorder=2)
+    ax_na.plot([0, -0.55, 0.55, 0, -0.55], [-1.0, 0.0, 0.0, 1.0, 0.0],
+               color="#1a2030", lw=0.8, zorder=3)
+    # Centre dot
+    ax_na.plot(0, 0, "o", ms=3, color="#1a2030", zorder=4)
+    # N label
+    ax_na.text(0, 1.25, "N", ha="center", va="bottom",
+               fontsize=8, fontweight="bold", color="#1a2030")
+
+
+def _pm_locator_map(ax, catches_gdf, main_xmin, main_xmax, main_ymin, main_ymax):
+    """Country-level context inset with CartoDB basemap tiles."""
+    from matplotlib.patches import Rectangle as MplRect
+    from shapely.geometry import Point
+    import contextily as ctx
+
+    ax_ins = ax.inset_axes([0.005, 0.68, 0.29, 0.31])
+
+    centroid = catches_gdf.unary_union.centroid
+    cx, cy   = centroid.x, centroid.y
+
+    # ── Regional extent centred on the catchment ─────────────────────
+    # Base: 1.5× the country span, always centred on the catchment.
+    # Hard floor of 20°×16° so small countries still get regional context.
+    hw, hh = 12.0, 9.0   # fallback if country lookup fails
+    countries_path = _ensure_ne_countries()
+    if countries_path:
+        try:
+            countries = gpd.read_file(countries_path)
+            pt = Point(cx, cy)
+            containing = countries[countries.geometry.contains(pt)]
+            if containing.empty:
+                countries = countries.copy()
+                countries["_d"] = countries.geometry.centroid.distance(pt)
+                containing = countries.nsmallest(1, "_d")
+            if not containing.empty:
+                b = containing.iloc[0].geometry.bounds  # (minx,miny,maxx,maxy)
+                # 1.5× country span, min 20°×16°, max 50°×40°
+                # Always centred on the CATCHMENT, not the country centroid
+                hw = max(min((b[2] - b[0]) * 0.75, 25.0), 10.0)
+                hh = max(min((b[3] - b[1]) * 0.75, 20.0),  8.0)
+        except Exception as e:
+            print(f"  [locator] country lookup: {e}")
+
+    ix0 = max(cx - hw, -180);  ix1 = min(cx + hw, 180)
+    iy0 = max(cy - hh,  -90);  iy1 = min(cy + hh,  90)
+
+    ax_ins.set_facecolor("#b8d4e8")
+    ax_ins.set_xlim(ix0, ix1)
+    ax_ins.set_ylim(iy0, iy1)
+
+    # CartoDB tiles — same style as main map
+    try:
+        ctx.add_basemap(ax_ins, crs="EPSG:4326",
+                        source=ctx.providers.CartoDB.Positron,
+                        attribution=False, zoom="auto")
+        ax_ins.set_xlim(ix0, ix1)   # restore after contextily
+        ax_ins.set_ylim(iy0, iy1)
+    except Exception:
+        try:
+            import geodatasets
+            land = gpd.read_file(geodatasets.get_path("naturalearth.land"))
+            land.clip([ix0, iy0, ix1, iy1]).plot(
+                ax=ax_ins, color="#e8e4d8", edgecolor="#bbb", lw=0.4, zorder=1)
+        except Exception:
+            pass
+
+    # Catchment — solid red so it reads at country scale
+    catches_gdf.plot(ax=ax_ins, color="#e02020", alpha=0.9,
+                     edgecolor="#900000", linewidth=0.8, zorder=4)
+
+    ax_ins.set_xticks([]); ax_ins.set_yticks([])
+    for sp in ax_ins.spines.values():
+        sp.set_edgecolor("#888"); sp.set_linewidth(0.8)
+    ax_ins.set_title("Country context", fontsize=6, color="#333",
+                     pad=2.5, fontweight="bold")
+
+
+def _pm_scale_bar(ax, xmin, xmax, ymin, ymax):
+    """Draw a two-tone GIS scale bar at the bottom-left of *ax*."""
+    from matplotlib.patches import FancyBboxPatch, Rectangle as MplRect
+
+    center_lat  = (ymin + ymax) / 2
+    km_per_deg  = 111.32 * math.cos(math.radians(center_lat))
+    map_km      = (xmax - xmin) * km_per_deg
+
+    # Aim for ~20 % of map width, rounded to a nice number
+    target = map_km * 0.20
+    mag    = 10 ** math.floor(math.log10(max(target, 0.001)))
+    nice   = min([mag, 2*mag, 5*mag, 10*mag], key=lambda v: abs(v - target))
+    nice   = max(nice, 0.01)
+
+    bar_frac = min((nice / km_per_deg) / (xmax - xmin), 0.35)
+    bx0, bx1 = 0.05, 0.05 + bar_frac
+    by,  bh  = 0.058, 0.012
+
+    # Background
+    ax.add_patch(FancyBboxPatch(
+        (bx0 - 0.01, by - 0.024), bar_frac + 0.02, 0.060,
+        boxstyle="square,pad=0.005", transform=ax.transAxes,
+        fc="white", ec="#aaa", lw=0.6, zorder=11
+    ))
+    mid = (bx0 + bx1) / 2
+    # Dark first half
+    ax.add_patch(MplRect((bx0, by), (bx1-bx0)/2, bh,
+                         transform=ax.transAxes, fc="#333", ec="none", zorder=12))
+    # White second half
+    ax.add_patch(MplRect((mid, by), (bx1-bx0)/2, bh,
+                         transform=ax.transAxes, fc="white", ec="none", zorder=12))
+    # Outline
+    ax.add_patch(MplRect((bx0, by), bx1-bx0, bh,
+                         transform=ax.transAxes, fc="none", ec="#333", lw=0.8, zorder=13))
+    # Labels
+    lbl = f"{nice:.0f} km" if nice >= 1 else f"{nice*1000:.0f} m"
+    for xf, txt in [(bx0, "0"), (mid, f"{nice/2:.0f}"), (bx1, lbl)]:
+        ax.text(xf, by + bh + 0.006, txt, transform=ax.transAxes,
+                ha="center", va="bottom", fontsize=6.5, color="#333", zorder=14)
+
+
+def _pm_legend(ax, outlet_info, rivers_gdf):
+    """Build and attach a styled legend to *ax*."""
+    from matplotlib.patches import Patch
+    from matplotlib.lines  import Line2D
+
+    handles, labels = [], []
+
+    RIVER_COLORS = ["#aacce8","#6aaed6","#3182bd","#1a5ea0","#0d3a78","#062050"]
+    RIVER_LABELS = ["Stream order 1","Stream order 2","Stream order 3",
+                    "Stream order 4","Stream order 5","Stream order 6+"]
+
+    for o in outlet_info:
+        name  = o.get("name") or f'Catchment {o["id"]}'
+        color = o.get("color", "#3399ff")
+        handles.append(Patch(facecolor=color, edgecolor=color,
+                             alpha=0.55, linewidth=1.5, linestyle="--"))
+        labels.append(name)
+
+    handles.append(Line2D([0], [0], marker="o", color="none", markersize=7,
+                          markerfacecolor="#888", markeredgecolor="white",
+                          markeredgewidth=1.5, linewidth=0))
+    labels.append("Outlet")
+
+    if not rivers_gdf.empty and "order" in rivers_gdf.columns:
+        for order in sorted(rivers_gdf["order"].unique()):
+            idx = min(int(order) - 1, 5)
+            handles.append(Line2D([0], [0], color=RIVER_COLORS[idx],
+                                  linewidth=max(0.8, int(order)*0.6 + 0.4)))
+            labels.append(RIVER_LABELS[idx])
+
+    legend = ax.legend(
+        handles, labels,
+        loc="lower right", fontsize=7.5,
+        title="Legend", title_fontsize=8.5,
+        framealpha=0.55, edgecolor="#aaa", fancybox=False,
+        handlelength=2.2, handleheight=1.3,
+        borderpad=0.9, labelspacing=0.55,
+    )
+    legend.get_frame().set_linewidth(0.8)
+    legend.get_title().set_fontweight("bold")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  IMAGE RENDERING HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -761,10 +1031,17 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/dem_progress")
+def api_dem_progress():
+    """Polled by the frontend every ~600 ms to get real-time DEM processing status."""
+    return jsonify(_dem_progress)
+
+
 @app.route("/api/fetch_dem", methods=["POST"])
 def api_fetch_dem():
     """Download + clip + condition DEM. Body: {polygon} GeoJSON geometry."""
     data = request.json or {}
+    _dem_progress.update({"stage": "Starting…", "detail": "", "pct": 0, "source": "", "fallback_reason": "", "error": None, "done": False})
     try:
         if "polygon" in data:
             polygon = data["polygon"]
@@ -772,8 +1049,12 @@ def api_fetch_dem():
             lats = [c[1] for c in coords]; lons = [c[0] for c in coords]
             south, north = min(lats), max(lats)
             west,  east  = min(lons), max(lons)
+            area_deg2 = (north - south) * (east - west)
             print(f"[DEM] Polygon bbox: S={south:.4f} N={north:.4f} W={west:.4f} E={east:.4f}")
+            _emit("Contacting OpenTopography…",
+                  f"Bbox: {south:.3f}°–{north:.3f}°N, {west:.3f}°–{east:.3f}°E", pct=1)
             dem_path = fetch_dem_bbox(south, north, west, east)
+            _emit("Clipping to study area…", "Masking cells outside drawn polygon", pct=20)
             dem_path = clip_dem_to_polygon(dem_path, polygon)
         else:
             return jsonify({"error": "Only polygon-based DEM download is supported."}), 400
@@ -786,7 +1067,11 @@ def api_fetch_dem():
         acc = _cache["acc_arr"]
         p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
         default_acc = int(round(p95 / 50) * 50)
+        _emit("Extracting river network…",
+              f"Auto-selecting stream threshold (starting at {default_acc} cells)", pct=93)
         default_acc, rivers = _auto_threshold(default_acc)
+        n_segs = len(rivers.get("features", []))
+        _emit_done(f"DEM ready · {_cache['shape'][0]}×{_cache['shape'][1]} cells · {n_segs} river segments")
         return jsonify({
             "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
             "res_m":       round(abs(_cache["affine"].a) * 111320, 1),
@@ -794,9 +1079,16 @@ def api_fetch_dem():
             "acc_p95":     p95,
             "default_acc": default_acc,
             "rivers":      rivers,
+            "dem_source":       _dem_progress.get("source", "OpenTopography SRTM GL1 (30 m)"),
+            "fallback_reason":  _dem_progress.get("fallback_reason", ""),
         })
     except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        msg = str(e)
+        _emit_error(msg)
+        return jsonify({"error": msg, "trace": traceback.format_exc()}), 500
+
+
+
 
 
 @app.route("/api/upload_dem", methods=["POST"])
@@ -811,6 +1103,8 @@ def api_upload_dem():
     polygon_str = request.form.get("polygon")
     polygon = json.loads(polygon_str) if polygon_str else None
 
+    _dem_progress.update({"stage": "Reading uploaded file…", "detail": f.filename,
+                          "pct": 0, "source": "", "fallback_reason": "", "error": None, "done": False})
     try:
         with tempfile.TemporaryDirectory() as td:
             raw_path = os.path.join(td, "upload.tif")
@@ -820,6 +1114,8 @@ def api_upload_dem():
                 src_crs    = src.crs
                 src_nodata = src.nodata
                 src_bounds = src.bounds
+                _emit("Inspecting uploaded DEM…",
+                      f"{src.width}×{src.height} px · dtype={src.dtypes[0]} · CRS={src_crs}", pct=5)
                 print(f"  Uploaded DEM: {src.width}×{src.height} px  dtype={src.dtypes[0]}  "
                       f"nodata={src_nodata}  crs={src_crs}  bounds={src_bounds}")
 
@@ -847,7 +1143,7 @@ def api_upload_dem():
                     "Clip to your study area in QGIS first, then re-upload."}), 400
 
             norm_path = os.path.join(td, "upload_norm.tif")
-            print(f"  Normalising → WGS84 float32 …")
+            _emit("Normalising DEM…", "Reprojecting to WGS84 float32", pct=18)
             with rasterio.open(raw_path) as src:
                 tf_dst, w_dst, h_dst = calculate_default_transform(
                     src_crs, dst_crs, src.width, src.height, *src.bounds)
@@ -876,7 +1172,11 @@ def api_upload_dem():
         acc = _cache["acc_arr"]
         p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
         default_acc = int(round(p95 / 50) * 50)
+        _emit("Extracting river network…",
+              f"Auto-selecting stream threshold (starting at {default_acc} cells)", pct=93)
         default_acc, rivers = _auto_threshold(default_acc)
+        n_segs = len(rivers.get("features", []))
+        _emit_done(f"DEM ready · {_cache['shape'][0]}×{_cache['shape'][1]} cells · {n_segs} river segments")
         return jsonify({
             "bounds":      {"south": w[1], "west": w[0], "north": w[3], "east": w[2]},
             "res_m":       round(abs(_cache["affine"].a) * 111320, 1),
@@ -887,7 +1187,9 @@ def api_upload_dem():
             "source":      "upload",
         })
     except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+        msg = str(e)
+        _emit_error(msg)
+        return jsonify({"error": msg, "trace": traceback.format_exc()}), 500
 
 
 @app.route("/api/snap", methods=["POST"])
@@ -1140,6 +1442,210 @@ def api_export(fmt):
     return jsonify({"error": f"Unknown format: {fmt}"}), 400
 
 
+@app.route("/api/print_map", methods=["POST"])
+def api_print_map():
+    """Render a print-quality GIS map as PNG and return it."""
+    data = request.json or {}
+    if not _all_results:
+        return jsonify({"error": "No delineation results to print."}), 400
+
+    fig = None
+    try:
+        title       = data.get("title", "Catchment Map")
+        outlet_info = data.get("outlets", [])      # [{id, name, color}]
+        paper       = data.get("paper", "A4")
+        orient      = data.get("orientation", "landscape")
+        acc_thresh  = int(data.get("acc_threshold", 500))
+
+        # Paper size (landscape by default; swap axes for portrait)
+        sizes = {"A4": (13.69, 8.27), "A3": (18.54, 11.69), "Letter": (13.0, 8.5)}
+        fw, fh = sizes.get(paper, sizes["A4"])
+        if orient == "portrait":
+            fw, fh = fh, fw
+
+        # Build lookup by outlet_id (1-indexed)
+        lookup = {int(o["id"]): o for o in outlet_info}
+
+        # Assemble GeoDataFrames
+        all_catches, all_outlet_feats = [], []
+        for i, r in enumerate(_all_results):
+            oid  = i + 1
+            info = lookup.get(oid, {})
+            name  = (info.get("name") or "").strip() or f"Catchment {oid}"
+            color = info.get("color", "#3399ff")
+            for feat in r["catchment"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_catches.append(f2)
+            for feat in r["outlet"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_outlet_feats.append(f2)
+
+        catches_gdf = gpd.GeoDataFrame.from_features(all_catches, crs=4326)
+        outlets_gdf = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+
+        # Union of all catchment polygons — used for clipping rivers & DEM
+        catchment_union = catches_gdf.unary_union
+
+        # Rivers clipped to catchment area only
+        rivers_fc  = extract_rivers_global(acc_thresh)
+        rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                           if rivers_fc.get("features") else gpd.GeoDataFrame())
+        rivers_gdf = (rivers_gdf_full.clip(catchment_union)
+                      if not rivers_gdf_full.empty else gpd.GeoDataFrame())
+
+        # Map extent: bounding box of all catchments + 12 % padding
+        tb  = catches_gdf.total_bounds          # [minx, miny, maxx, maxy]
+        pw  = (tb[2] - tb[0]) * 0.12
+        ph  = (tb[3] - tb[1]) * 0.12
+        xmin, xmax = tb[0] - pw, tb[2] + pw
+        ymin, ymax = tb[1] - ph, tb[3] + ph
+
+        # Force equal aspect: expand the shorter axis
+        data_w = xmax - xmin
+        data_h = ymax - ymin
+        map_aspect = fw * 0.82 / (fh * 0.80)
+        if data_w / data_h < map_aspect:
+            delta = data_h * map_aspect - data_w
+            xmin -= delta / 2; xmax += delta / 2
+        else:
+            delta = data_w / map_aspect - data_h
+            ymin -= delta / 2; ymax += delta / 2
+
+        # ── Figure ─────────────────────────────────────────────────────────
+        RIVER_COLORS = ["#aacce8","#6aaed6","#3182bd","#1a5ea0","#0d3a78","#062050"]
+
+        fig = plt.figure(figsize=(fw, fh), facecolor="white")
+        ax  = fig.add_axes([0.09, 0.11, 0.82, 0.80])
+
+        ax.set_facecolor("#dde8f0")   # fallback colour if tiles fail
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+
+        # ── Basemap tiles (CartoDB Positron — clean print style) ───────
+        try:
+            import contextily as ctx
+            ctx.add_basemap(ax, crs="EPSG:4326",
+                            source=ctx.providers.CartoDB.Positron,
+                            attribution=False, zoom="auto")
+        except Exception:
+            pass   # offline / tile error — plain background remains
+        # contextily may shift limits — restore our pre-computed extent
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+
+        # Ticks only, no grid
+        ax.tick_params(labelsize=7, direction="out", color="#777")
+        ax.set_xlabel("Longitude (°E)", fontsize=8, color="#444", labelpad=4)
+        ax.set_ylabel("Latitude (°N)",  fontsize=8, color="#444", labelpad=4)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#888")
+            spine.set_linewidth(0.8)
+
+        # ── DEM hillshade clipped to catchment polygon ─────────────────
+        if _cache and "dem_arr" in _cache:
+            try:
+                _dem     = _cache["dem_arr"].copy().astype(float)
+                _aff     = _cache["affine"]
+                _nr, _nc = _dem.shape
+                _west    = _aff.c
+                _east    = _aff.c + _aff.a * _nc
+                _north   = _aff.f
+                _south   = _aff.f + _aff.e * _nr   # aff.e is negative
+
+                # Rasterise catchment union → boolean mask (rasterize is
+                # more reliable than geometry_mask for complex polygons)
+                _cmask = rasterio.features.rasterize(
+                    [(catchment_union, 1)],
+                    out_shape=(_nr, _nc),
+                    transform=_aff,
+                    fill=0, dtype="uint8",
+                ).astype(bool)
+
+                _dem_c = np.where(_cmask & np.isfinite(_dem), _dem, np.nan)
+                _valid = np.isfinite(_dem_c)
+                if _valid.any():
+                    _vmin = float(np.percentile(_dem_c[_valid], 2))
+                    _vmax = float(np.percentile(_dem_c[_valid], 98))
+                    if _vmax <= _vmin:
+                        _vmax = _vmin + 1.0
+                    # LightSource.shade needs no NaN — fill with vmin outside
+                    _dem_hs = np.where(_valid, _dem_c, _vmin)
+                    _ls  = LightSource(azdeg=315, altdeg=40)
+                    _rgb = _ls.shade(_dem_hs, cmap=plt.cm.gist_earth,
+                                     vmin=_vmin, vmax=_vmax,
+                                     blend_mode="soft", vert_exag=1.5)
+                    # 65 % opacity — lets basemap show through, muted for print
+                    _alpha = np.where(_cmask, 0.65, 0.0)
+                    _rgba  = np.dstack([_rgb[..., :3], _alpha])
+                    ax.imshow(_rgba, extent=[_west, _east, _south, _north],
+                              origin="upper", zorder=1, interpolation="bilinear",
+                              aspect="auto")
+            except Exception:
+                traceback.print_exc()   # log but don't abort the map
+
+        # Catchment fills + dashed borders (on top of hillshade)
+        for _, row in catches_gdf.iterrows():
+            color = row.get("color", "#3399ff")
+            gdf_r = gpd.GeoDataFrame([row], crs=4326)
+            gdf_r.plot(ax=ax, color=color, alpha=0.12, linewidth=0, zorder=2)
+            gdf_r.boundary.plot(ax=ax, color=color, linewidth=1.8,
+                                linestyle="--", zorder=3)
+
+        # River network (clipped to catchment)
+        if not rivers_gdf.empty and "order" in rivers_gdf.columns:
+            for order in sorted(rivers_gdf["order"].unique()):
+                sub = rivers_gdf[rivers_gdf["order"] == order]
+                lw  = max(0.5, int(order) * 0.6 + 0.4)
+                sub.plot(ax=ax, color=RIVER_COLORS[min(int(order)-1, 5)],
+                         linewidth=lw, zorder=4)
+
+        # Outlet markers + name labels
+        for _, row in outlets_gdf.iterrows():
+            color = row.get("color", "#ff4444")
+            name  = row.get("name", f"Outlet {row.get('outlet_id','')}")
+            x, y  = row.geometry.x, row.geometry.y
+            ax.plot(x, y, "o", color=color, markersize=7,
+                    markeredgecolor="white", markeredgewidth=1.5, zorder=6)
+            ax.annotate(
+                name, (x, y),
+                textcoords="offset points", xytext=(8, 5),
+                fontsize=7.5, fontweight="bold", color="#1a2030", zorder=7,
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.85),
+            )
+
+        # GIS map furniture
+        _pm_north_arrow(ax)
+        _pm_scale_bar(ax, xmin, xmax, ymin, ymax)
+        _pm_legend(ax, outlet_info, rivers_gdf)
+        _pm_locator_map(ax, catches_gdf, xmin, xmax, ymin, ymax)
+
+        # Title + credits
+        fig.text(0.5, 0.945, title, ha="center", va="center",
+                 fontsize=15, fontweight="bold", color="#1a2030")
+        fig.text(
+            0.09, 0.030,
+            "Projection: WGS84 (EPSG:4326)  ·  Stream network: Strahler ordering"
+            "  ·  DEM: SRTM GL1 30 m  ·  Generated with Catchment Delineation Tool",
+            ha="left", va="bottom", fontsize=6.0, color="#999", style="italic",
+        )
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=220, bbox_inches="tight")
+        buf.seek(0)
+        return send_file(buf, mimetype="image/png", as_attachment=True,
+                         download_name="catchment_map.png")
+
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    finally:
+        if fig is not None:
+            plt.close(fig)
+
+
 @app.route("/api/upload_shapefile", methods=["POST"])
 def api_upload_shapefile():
     if "file" not in request.files:
@@ -1181,4 +1687,4 @@ def api_upload_shapefile():
 if __name__ == "__main__":
     print("Catchment Delineation — SRTM GL1 (30 m) via OpenTopography")
     print("  Open your browser at:  http://localhost:5000\n")
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000, threaded=True)

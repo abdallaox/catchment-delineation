@@ -141,14 +141,53 @@
     #map.wait { cursor:wait; }
 
     /* Loading overlay */
-    #loader { display:none; position:fixed; inset:0; background:rgba(8,15,22,.65); z-index:9999;
-              align-items:center; justify-content:center; flex-direction:column; gap:14px; }
+    #loader { display:none; position:fixed; inset:0; background:rgba(4,10,18,.8);
+              backdrop-filter:blur(2px); z-index:9999;
+              align-items:center; justify-content:center; }
     #loader.on { display:flex; }
-    .spinner { width:46px; height:46px; border:4px solid var(--border); border-top-color:var(--accent);
-               border-radius:50%; animation:spin .7s linear infinite; }
+    #loader-card { background:#0b1929; border:1px solid #1b3250; width:360px;
+                   padding:24px 24px 20px; display:flex; flex-direction:column; gap:0; }
+    #loader-head { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+    .spinner { width:16px; height:16px; border:2px solid #1b3250; border-top-color:#4a9eda;
+               border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
     @keyframes spin { to { transform:rotate(360deg); } }
-    #loader-text { color:var(--accent); font-size:13px; }
-    #loader-detail { color:var(--muted); font-size:11px; font-family:monospace; max-width:320px; text-align:center; }
+    #loader-text { color:#e2eaf4; font-size:13px; font-weight:600; letter-spacing:.01em; flex:1; }
+    #loader-detail { color:#5a7a96; font-size:11px; font-family:monospace; line-height:1.6;
+                     margin-bottom:14px; min-height:1.6em; }
+    #loader-track { width:100%; height:3px; background:#142236; margin-bottom:8px; }
+    #loader-progress-bar { height:100%; width:0%; background:#4a9eda; transition:width .35s ease; }
+    #loader-foot { display:flex; align-items:center; justify-content:space-between; }
+    #loader-progress-pct { color:#4a9eda; font-size:11px; font-weight:700; font-family:monospace; }
+    #loader-source { color:#4d8a6a; font-size:10px; font-family:monospace; max-width:240px;
+                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #loader-error { display:none; color:#d07070; font-size:11px; font-family:monospace;
+                    margin-top:12px; padding-top:12px; border-top:1px solid #2a1818; line-height:1.5; }
+    #loader-close { display:none; margin-top:12px; background:none; color:#8090a0;
+                    border:1px solid #1b3250; padding:5px 14px; cursor:pointer;
+                    font-size:11px; align-self:flex-end; }
+    #loader-close:hover { color:#e2eaf4; border-color:#3a5a7a; }
+
+    /* DEM report card */
+    #dem-report { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45);
+                  backdrop-filter:blur(3px); z-index:10001; align-items:center; justify-content:center; }
+    #dem-report.on { display:flex; }
+    #dem-report-inner { background:#fff; width:340px; padding:28px 28px 22px;
+                        box-shadow:0 8px 40px rgba(0,0,0,.18); }
+    #dem-report-inner.is-error { border-top:3px solid #e05555; }
+    #dem-report-inner.is-ok    { border-top:3px solid #2e9e6b; }
+    #dem-report-icon { font-size:22px; margin-bottom:10px; }
+    #dem-report-title { font-size:15px; font-weight:700; color:#111; margin-bottom:16px; }
+    .dem-report-row { display:flex; justify-content:space-between; align-items:baseline;
+                      padding:7px 0; border-bottom:1px solid #f0f0f0; font-size:12px; }
+    .dem-report-row:last-of-type { border-bottom:none; }
+    .dem-report-lbl { color:#777; font-weight:500; }
+    .dem-report-val { color:#111; font-weight:600; text-align:right; max-width:200px; }
+    #dem-report-error-msg { font-size:12px; color:#b03030; line-height:1.6;
+                            background:#fff5f5; padding:10px 12px; margin-bottom:4px; }
+    #dem-report-btn { margin-top:18px; width:100%; padding:10px; background:#111;
+                      color:#fff; border:none; font-size:13px; font-weight:600;
+                      cursor:pointer; letter-spacing:.02em; }
+    #dem-report-btn:hover { background:#333; }
 
     /* Map legend */
     #map-legend { display:none; position:absolute; bottom:30px; right:10px; z-index:800;
@@ -202,6 +241,30 @@
                       padding:4px 10px; font-size:11px; font-family:monospace; color:#7ec8e3;
                       pointer-events:none; letter-spacing:.4px; white-space:nowrap; }
 
+    /* Outlet name input */
+    .outlet-name-input { background:transparent; border:none; border-bottom:1px dashed var(--muted2);
+                         color:var(--text); font-size:12px; font-weight:600; width:100%;
+                         padding:1px 0; outline:none; cursor:text; }
+    .outlet-name-input:focus { border-bottom-color:var(--accent); }
+    .outlet-name-input::placeholder { color:var(--muted2); font-weight:400; }
+
+    /* Print modal */
+    #print-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72);
+                   z-index:10000; align-items:center; justify-content:center; }
+    #print-modal.on { display:flex; }
+    #print-modal-inner { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                         padding:22px 24px; width:340px; }
+    #print-modal-inner h3 { color:var(--accent); font-size:14px; margin-bottom:16px; }
+    .modal-field { margin-bottom:13px; }
+    .modal-field label { display:block; font-size:11px; color:var(--muted); margin-bottom:5px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; }
+    .modal-field input, .modal-field select {
+      width:100%; background:#0b1d2e; border:1px solid var(--border); border-radius:5px;
+      color:var(--text); font-size:13px; padding:7px 10px; outline:none; }
+    .modal-field input:focus, .modal-field select:focus { border-color:var(--accent); }
+    .modal-field select option { background:var(--panel); }
+    .btn-print { background:#1a5c38; color:#fff; }
+    .btn-print:hover { background:#1f7046; }
+
     /* Leaflet overrides */
     .leaflet-control-zoom a { background:var(--panel) !important; color:var(--accent) !important; border-color:var(--border) !important; }
     .leaflet-bar { border-color:var(--border) !important; box-shadow:none !important; }
@@ -245,7 +308,7 @@
            onchange="uploadDEM(this)"/>
     <div class="btn-row">
       <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
-        &#8659;&nbsp; Download SRTM
+        &#8659;&nbsp; Download DEM
       </button>
       <button id="upload-dem-btn" class="btn btn-upload-dem"
               onclick="document.getElementById('dem-file-input').click()">
@@ -347,6 +410,9 @@
   <!-- Export -->
   <div class="section" id="export-section" style="display:none;">
     <div class="sec-title">Export results</div>
+    <button class="btn btn-print" style="margin-bottom:7px;" onclick="openPrintModal()">
+      &#128438;&nbsp; Print Map (PNG)
+    </button>
     <button class="btn btn-gpkg" onclick="exportResult('gpkg')">
       &#8659;&nbsp; GeoPackage (.gpkg) — open in QGIS
     </button>
@@ -455,9 +521,61 @@
 
 <!-- Loading overlay -->
 <div id="loader">
-  <div class="spinner"></div>
-  <p id="loader-text">Processing…</p>
-  <p id="loader-detail"></p>
+  <div id="loader-card">
+    <div id="loader-head">
+      <div class="spinner" id="loader-spinner"></div>
+      <span id="loader-text">Processing…</span>
+    </div>
+    <div id="loader-detail"></div>
+    <div id="loader-track"><div id="loader-progress-bar"></div></div>
+    <div id="loader-foot">
+      <span id="loader-source"></span>
+      <span id="loader-progress-pct">0%</span>
+    </div>
+    <div id="loader-error"></div>
+    <button id="loader-close" onclick="hideLoader()">Dismiss</button>
+  </div>
+</div>
+
+<!-- DEM report card -->
+<div id="dem-report">
+  <div id="dem-report-inner">
+    <div id="dem-report-icon"></div>
+    <div id="dem-report-title"></div>
+    <div id="dem-report-rows"></div>
+    <div id="dem-report-error-msg" style="display:none"></div>
+    <button id="dem-report-btn" onclick="closeDemReport()">Continue</button>
+  </div>
+</div>
+
+<!-- Print modal -->
+<div id="print-modal">
+  <div id="print-modal-inner">
+    <h3>&#128438;&nbsp; Print Map</h3>
+    <div class="modal-field">
+      <label>Map Title</label>
+      <input id="print-title" type="text" placeholder="Catchment Map" value="Catchment Map"/>
+    </div>
+    <div class="modal-field">
+      <label>Paper Size</label>
+      <select id="print-paper">
+        <option value="A4">A4</option>
+        <option value="A3">A3</option>
+        <option value="Letter">Letter</option>
+      </select>
+    </div>
+    <div class="modal-field">
+      <label>Orientation</label>
+      <select id="print-orientation">
+        <option value="landscape">Landscape</option>
+        <option value="portrait">Portrait</option>
+      </select>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:6px;">
+      <button class="btn btn-danger btn-sm" style="flex:1;" onclick="closePrintModal()">Cancel</button>
+      <button class="btn btn-print btn-sm" style="flex:1;" onclick="submitPrint()">&#128438; Generate PNG</button>
+    </div>
+  </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -519,8 +637,8 @@ map.on(L.Draw.Event.CREATED, function(e) {
     `Bbox: S ${b.getSouth().toFixed(4)}° N ${b.getNorth().toFixed(4)}° W ${b.getWest().toFixed(4)}° E ${b.getEast().toFixed(4)}°`;
   document.getElementById('download-btn').disabled = false;
   document.getElementById('instruction-text').textContent =
-    'Study area defined — click "Download SRTM DEM" to fetch terrain.';
-  setStatus('Study area defined. Click Download SRTM DEM.', '');
+    'Study area defined — click "Download DEM" to fetch terrain.';
+  setStatus('Study area defined. Click Download DEM.', '');
 });
 
 // ── Geocoder ──────────────────────────────────────────────────────────────────
@@ -582,7 +700,7 @@ function placeOutletAndDelineate(lat, lon, acc) {
           style: { color: color, weight: 2.5, fillColor: color, fillOpacity: 0.15, dashArray: '6 3' },
         }).addTo(map);
       }
-      const outlet = { id, lat: snap.lat, lon: snap.lon, color, marker, catchLayer, stats: result.stats };
+      const outlet = { id, lat: snap.lat, lon: snap.lon, color, name: '', marker, catchLayer, stats: result.stats };
       outlets.push(outlet);
       renderOutletList();
       document.getElementById('export-section').style.display = 'block';
@@ -607,12 +725,66 @@ function renderOutletList() {
     <div class="outlet-item">
       <div class="outlet-dot" style="background:${o.color};"></div>
       <div class="outlet-info">
+        <input class="outlet-name-input" type="text"
+               value="${(o.name || '').replace(/"/g,'&quot;')}"
+               placeholder="Catchment #${o.id}"
+               oninput="updateOutletName(${o.id}, this.value)"
+               title="Click to rename"/>
         <div class="coords">#${o.id} &nbsp; ${o.lat.toFixed(4)}, ${o.lon.toFixed(4)}</div>
         <div class="stats">${o.stats.area_km2} km² · order ${o.stats.max_strahler}</div>
       </div>
       <button class="outlet-remove" onclick="removeOutlet(${o.id})" title="Remove outlet #${o.id}">&times;</button>
     </div>
   `).join('');
+}
+
+function updateOutletName(id, val) {
+  const o = outlets.find(o => o.id === id);
+  if (o) o.name = val;
+}
+
+// ── Print map ─────────────────────────────────────────────────────────────────
+function openPrintModal() {
+  document.getElementById('print-modal').classList.add('on');
+}
+function closePrintModal() {
+  document.getElementById('print-modal').classList.remove('on');
+}
+function submitPrint() {
+  const title  = document.getElementById('print-title').value || 'Catchment Map';
+  const paper  = document.getElementById('print-paper').value;
+  const orient = document.getElementById('print-orientation').value;
+  const acc    = parseInt(document.getElementById('acc-slider').value) || 500;
+
+  const outletData = outlets.map(o => ({
+    id:    o.id,
+    name:  o.name || `Catchment #${o.id}`,
+    color: o.color,
+  }));
+
+  closePrintModal();
+  setLoader('Rendering print map…', 'Composing GIS layout…');
+
+  fetch('/api/print_map', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, paper, orientation: orient,
+                           acc_threshold: acc, outlets: outletData }),
+  })
+  .then(r => {
+    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Server error'); });
+    return r.blob();
+  })
+  .then(blob => {
+    hideLoader();
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href = url; a.download = 'catchment_map.png';
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus('Map exported as PNG.', 'ok');
+  })
+  .catch(err => { hideLoader(); setStatus('Print error: ' + err, 'error'); });
 }
 
 function removeOutlet(id) {
@@ -660,10 +832,16 @@ function _clearPreviousDEM() {
   document.getElementById('tog-fdir').checked = false;
 }
 
-function _handleDemResponse(info, timers, sourceLabel) {
-  timers.forEach(clearTimeout);
+function _handleDemResponse(info, _unused, sourceLabel) {
+  stopProgressPoll();
   hideLoader();
-  if (info.error) { setStatus('DEM error: ' + info.error, 'error'); return; }
+  if (info.error) {
+    showDemReportError(info.error);
+    setStatus('DEM error: ' + info.error, 'error');
+    return;
+  }
+  // Use server-reported source if available (catches AWS fallback)
+  if (info.dem_source) sourceLabel = info.dem_source;
 
   demLoaded = true;
   const b = info.bounds;
@@ -702,41 +880,46 @@ function _handleDemResponse(info, timers, sourceLabel) {
     buildOrderLayers(info.rivers);
   }
 
-  document.getElementById('dem-res-val').textContent = info.res_m + ' m';
-  document.getElementById('dem-source-label').textContent = sourceLabel || '';
+  document.getElementById('dem-res-val').textContent       = info.res_m + ' m';
+  document.getElementById('dem-source-label').textContent  = sourceLabel || '';
   document.getElementById('dem-info').style.display        = 'block';
   document.getElementById('params-section').style.display  = 'block';
   document.getElementById('raster-section').style.display  = 'block';
   document.getElementById('outlets-section').style.display = 'block';
 
+  const nSegs = info.rivers ? info.rivers.features.length : 0;
   document.getElementById('instruction-text').textContent =
     `DEM ready (${info.res_m} m). Click on a stream to place an outlet and delineate its catchment.`;
-  setStatus(
-    `✓ DEM loaded · ${info.res_m} m · ${info.rivers ? info.rivers.features.length : 0} river segments · click a stream to delineate`,
-    'ok'
-  );
+  setStatus(`✓ DEM loaded · ${info.res_m} m · ${nSegs} river segments · click a stream to delineate`, 'ok');
+
+  const reportRows = [
+    ['Source',         sourceLabel || 'Unknown'],
+    ['Resolution',     info.res_m + ' m'],
+    ['River segments', nSegs.toLocaleString()],
+  ];
+  if (info.fallback_reason) {
+    reportRows.splice(1, 0, ['SRTM failed', info.fallback_reason]);
+  }
+  showDemReport(reportRows, false);
 }
 
 // ── Download DEM ──────────────────────────────────────────────────────────────
 function downloadDEM() {
   if (!drawnPolygon) return;
   _clearPreviousDEM();
-  setLoader('Connecting to OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
-  const msgs = [
-    [3000,  'Downloading SRTM tile(s)…',        'This may take a moment for large areas'],
-    [9000,  'Conditioning DEM…',                 'Filling pits and depressions (pysheds)'],
-    [16000, 'Computing flow direction…',          'D8 routing across every cell'],
-    [22000, 'Computing flow accumulation…',       'Counting upstream contributing cells'],
-    [30000, 'Extracting river network…',          'Tracing streams, computing Strahler orders'],
-  ];
-  const timers = msgs.map(([ms, txt, d]) => setTimeout(() => setLoader(txt, d), ms));
+  setLoader('Contacting OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
+  startProgressPoll();
   fetch('/api/fetch_dem', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ polygon: drawnPolygon }),
   })
   .then(r => r.json())
-  .then(info => _handleDemResponse(info, timers, 'Source: OpenTopography SRTM GL1 (30 m)'))
-  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Network error: '+e, 'error'); });
+  .then(info => {
+    stopProgressPoll(); hideLoader();
+    if (info.error) { showDemReportError(info.error); setStatus('DEM error: ' + info.error, 'error'); return; }
+    _handleDemResponse(info, [], 'OpenTopography SRTM GL1 (30 m)');
+  })
+  .catch(e => { stopProgressPoll(); hideLoader(); showDemReportError('Network error: ' + e); setStatus('Network error: '+e, 'error'); });
 }
 
 // ── Upload DEM ────────────────────────────────────────────────────────────────
@@ -748,33 +931,23 @@ function uploadDEM(input) {
   const _lbl = document.getElementById('dem-source-label');
   _lbl.textContent = ''; _lbl.style.color = '';
   setLoader('Reading uploaded DEM…', file.name);
-  const msgs = [
-    [3000,  'Reprojecting to WGS84 if needed…',  'Checking coordinate reference system'],
-    [8000,  'Conditioning DEM…',                  'Filling pits and depressions (pysheds)'],
-    [15000, 'Computing flow direction…',           'D8 routing across every cell'],
-    [21000, 'Computing flow accumulation…',        'Counting upstream contributing cells'],
-    [28000, 'Extracting river network…',           'Tracing streams, computing Strahler orders'],
-  ];
-  const timers = msgs.map(([ms, txt, d]) => setTimeout(() => setLoader(txt, d), ms));
+  startProgressPoll();
   const fd = new FormData();
   fd.append('file', file);
-  // Do not send the drawn polygon — uploaded DEM defines its own extent.
   fetch('/api/upload_dem', { method:'POST', body: fd })
   .then(r => r.json().then(data => ({ ok: r.ok, data })))
   .then(({ ok, data }) => {
+    stopProgressPoll(); hideLoader();
     if (!ok || data.error) {
-      timers.forEach(clearTimeout); hideLoader();
       const msg = data.error || 'Unknown server error';
-      const lbl = document.getElementById('dem-source-label');
-      lbl.textContent = '⚠ ' + msg;
-      lbl.style.color = 'var(--error)';
-      lbl.style.whiteSpace = 'normal';
       console.error('DEM upload trace:', data.trace || '(no trace)');
+      showDemReportError(msg);
+      setStatus('Upload error: ' + msg, 'error');
       return;
     }
-    _handleDemResponse(data, timers, 'Source: ' + file.name);
+    _handleDemResponse(data, [], file.name);
   })
-  .catch(e => { timers.forEach(clearTimeout); hideLoader(); setStatus('Upload error: ' + e, 'error'); });
+  .catch(e => { stopProgressPoll(); hideLoader(); showDemReportError('Upload error: ' + e); setStatus('Upload error: ' + e, 'error'); });
 }
 
 // ── River helpers ─────────────────────────────────────────────────────────────
@@ -1033,16 +1206,105 @@ function setStatus(msg, cls) {
   el.textContent = msg;
   el.className   = cls || '';
 }
-function setLoader(text, detail) {
+function setLoader(text, detail, pct) {
   document.getElementById('loader-text').textContent   = text   || 'Processing…';
   document.getElementById('loader-detail').textContent = detail || '';
+  document.getElementById('loader-error').style.display = 'none';
+  document.getElementById('loader-close').style.display = 'none';
+  document.getElementById('loader-source').textContent = '';
+  _setLoaderPct(pct !== undefined ? pct : 0);
   document.getElementById('loader').classList.add('on');
   document.getElementById('map').classList.add('wait');
 }
+function _setLoaderPct(pct) {
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  document.getElementById('loader-progress-bar').style.width = p + '%';
+  document.getElementById('loader-progress-pct').textContent = p + '%';
+}
+function _setLoaderSource(src) {
+  document.getElementById('loader-source').textContent = src;
+}
 function showLoader(msg) { setLoader(msg, ''); }
+function showLoaderError(msg) {
+  document.getElementById('loader-text').textContent    = 'Error';
+  document.getElementById('loader-detail').textContent  = '';
+  document.getElementById('loader-spinner').style.display = 'none';
+  document.getElementById('loader-error').textContent   = msg;
+  document.getElementById('loader-error').style.display = 'block';
+  document.getElementById('loader-close').style.display = 'block';
+  document.getElementById('loader').classList.add('on');
+  document.getElementById('map').classList.remove('wait');
+}
 function hideLoader() {
   document.getElementById('loader').classList.remove('on');
+  document.getElementById('loader-error').style.display = 'none';
+  document.getElementById('loader-close').style.display = 'none';
+  document.getElementById('loader-source').textContent  = '';
+  document.getElementById('loader-spinner').style.display = '';
+  document.getElementById('loader-progress-bar').style.width = '0%';
+  document.getElementById('loader-progress-pct').textContent = '0%';
   document.getElementById('map').classList.remove('wait');
+}
+
+// ── DEM report card ───────────────────────────────────────────────────────────
+function showDemReport(rows, isError) {
+  const inner = document.getElementById('dem-report-inner');
+  inner.className = isError ? 'is-error' : 'is-ok';
+  document.getElementById('dem-report-icon').textContent  = isError ? '✕' : '✓';
+  document.getElementById('dem-report-title').textContent = isError ? 'Download Failed' : 'DEM Ready';
+  const rowsEl = document.getElementById('dem-report-rows');
+  rowsEl.innerHTML = '';
+  rows.forEach(([lbl, val]) => {
+    const warn = lbl === 'SRTM failed';
+    rowsEl.insertAdjacentHTML('beforeend',
+      `<div class="dem-report-row">
+        <span class="dem-report-lbl" ${warn ? 'style="color:#b06020"' : ''}>${lbl}</span>
+        <span class="dem-report-val" ${warn ? 'style="color:#b06020;font-weight:400;font-size:11px"' : ''}>${val}</span>
+      </div>`);
+  });
+  const errEl = document.getElementById('dem-report-error-msg');
+  errEl.style.display = 'none';
+  document.getElementById('dem-report-btn').textContent = isError ? 'Dismiss' : 'Continue';
+  document.getElementById('dem-report').classList.add('on');
+}
+function showDemReportError(msg) {
+  const inner = document.getElementById('dem-report-inner');
+  inner.className = 'is-error';
+  document.getElementById('dem-report-icon').textContent  = '✕';
+  document.getElementById('dem-report-title').textContent = 'Error';
+  document.getElementById('dem-report-rows').innerHTML    = '';
+  const errEl = document.getElementById('dem-report-error-msg');
+  errEl.textContent    = msg;
+  errEl.style.display  = 'block';
+  document.getElementById('dem-report-btn').textContent = 'Dismiss';
+  document.getElementById('dem-report').classList.add('on');
+}
+function closeDemReport() {
+  document.getElementById('dem-report').classList.remove('on');
+}
+
+// ── Real-time progress polling ────────────────────────────────────────────────
+let _progressPoll = null;
+function startProgressPoll() {
+  if (_progressPoll) return;
+  _progressPoll = setInterval(() => {
+    fetch('/api/dem_progress')
+      .then(r => r.json())
+      .then(p => {
+        if (!document.getElementById('loader').classList.contains('on')) return;
+        if (p.error) { stopProgressPoll(); return; }
+        if (p.stage) {
+          document.getElementById('loader-text').textContent   = p.stage;
+          document.getElementById('loader-detail').textContent = p.detail || '';
+        }
+        if (p.pct !== undefined) _setLoaderPct(p.pct);
+        if (p.source) _setLoaderSource(p.source);
+      })
+      .catch(() => {});
+  }, 600);
+}
+function stopProgressPoll() {
+  if (_progressPoll) { clearInterval(_progressPoll); _progressPoll = null; }
 }
 
 updateEffectLabel();
