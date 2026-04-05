@@ -12,7 +12,7 @@ Environment variables:
     OPENTOPO_API_KEY  — OpenTopography API key (fallback to hard-coded key)
 """
 
-import os, sys, io, json, math, zipfile, tempfile, warnings, traceback, shutil
+import os, sys, io, json, math, zipfile, tempfile, warnings, traceback, shutil, datetime, base64, html as _html_mod
 import numpy as np
 import rasterio
 import rasterio.features
@@ -26,6 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import LightSource
+from matplotlib.backends.backend_pdf import PdfPages
 from flask import Flask, request, jsonify, send_file, render_template
 import geopandas as gpd
 from shapely.geometry import shape, mapping
@@ -52,6 +53,16 @@ D8_DIRMAP = (64, 128, 1, 2, 4, 8, 16, 32)
 D8_DELTAS = {64:(-1,0), 128:(-1,1), 1:(0,1), 2:(1,1),
              4:(1,0),   8:(1,-1),   16:(0,-1), 32:(-1,-1)}
 DELTA_TO_DIR = {v: k for k, v in D8_DELTAS.items()}
+
+# ── Report design constants ────────────────────────────────────────────────────
+_A4P = (8.27, 11.69)   # portrait A4 inches
+_RN  = "#0d2440"       # navy
+_RB  = "#1d5c9e"       # blue
+_RLB = "#d4eaf8"       # light blue
+_RG  = "#f5f7fa"       # light grey
+_RMG = "#7a8a9a"       # muted grey
+_RT  = "#1a1a2e"       # text dark
+_RMT = "#445566"       # text mid
 
 # ── Global state ───────────────────────────────────────────────────────────────
 _cache       = {}   # Conditioned DEM + fdir/acc arrays
@@ -1644,6 +1655,1183 @@ def api_print_map():
     finally:
         if fig is not None:
             plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HTML REPORT
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _rpt_compute_stats(catches_gdf, outlets_gdf):
+    """Return per-catchment morphometric stats as a list of dicts."""
+    cea = "+proj=cea +datum=WGS84"
+    stats = []
+    try:
+        ids = catches_gdf["outlet_id"].unique() if "outlet_id" in catches_gdf.columns else []
+    except Exception:
+        ids = []
+    for oid in sorted(ids):
+        sub = catches_gdf[catches_gdf["outlet_id"] == oid]
+        name  = str(sub.iloc[0].get("name",  f"Catchment {oid}")) if len(sub) else f"Catchment {oid}"
+        color = str(sub.iloc[0].get("color", "#3399ff"))           if len(sub) else "#3399ff"
+        try:
+            merged_geom = sub.geometry.unary_union
+            sub_union   = gpd.GeoDataFrame(geometry=[merged_geom], crs=4326)
+            sub_cea     = sub_union.to_crs(cea)
+            area_m2     = float(sub_cea.area.iloc[0])
+            perim_m     = float(sub_cea.length.iloc[0])
+            area_km2    = area_m2 / 1e6
+            perim_km    = perim_m / 1e3
+            circ        = (4 * math.pi * area_m2 / (perim_m ** 2)) if perim_m > 0 else 0.0
+            b           = sub_union.total_bounds   # [minx, miny, maxx, maxy]
+            diag_deg    = math.sqrt((b[2]-b[0])**2 + (b[3]-b[1])**2)
+            diag_km     = diag_deg * 111.32
+            elong       = (2 * math.sqrt(area_km2 / math.pi) / diag_km) if diag_km > 0 else 0.0
+        except Exception:
+            area_km2 = perim_km = circ = elong = 0.0
+
+        # Outlet lon/lat
+        lon_o, lat_o = None, None
+        try:
+            out_sub = outlets_gdf[outlets_gdf["outlet_id"] == oid]
+            if not out_sub.empty:
+                lon_o = round(float(out_sub.geometry.x.iloc[0]), 5)
+                lat_o = round(float(out_sub.geometry.y.iloc[0]), 5)
+        except Exception:
+            pass
+
+        # Elevation stats from DEM masked by catchment
+        elev = {}
+        if _cache and "dem_arr" in _cache:
+            try:
+                dem_arr  = _cache["dem_arr"]
+                aff      = _cache["affine"]
+                nr, nc   = dem_arr.shape
+                merged_geom2 = sub.geometry.unary_union
+                cmask = rasterio.features.rasterize(
+                    [(merged_geom2, 1)],
+                    out_shape=(nr, nc),
+                    transform=aff,
+                    fill=0, dtype="uint8",
+                ).astype(bool)
+                vals = dem_arr[cmask & np.isfinite(dem_arr)]
+                if len(vals) > 0:
+                    elev = {
+                        "min":  round(float(np.percentile(vals, 2)),  1),
+                        "max":  round(float(np.percentile(vals, 98)), 1),
+                        "mean": round(float(np.mean(vals)),            1),
+                        "std":  round(float(np.std(vals)),             1),
+                    }
+            except Exception:
+                pass
+
+        stats.append({
+            "id":      int(oid),
+            "name":    name,
+            "color":   color,
+            "area":    round(area_km2, 2),
+            "perim":   round(perim_km, 2),
+            "circ":    round(circ,     3),
+            "elong":   round(elong,    3),
+            "lon":     lon_o,
+            "lat":     lat_o,
+            "elev":    elev,
+        })
+    return stats
+
+
+def _rpt_compute_river_stats(rivers_gdf):
+    """Return per-Strahler-order stats as list of dicts."""
+    if rivers_gdf.empty or "order" not in rivers_gdf.columns:
+        return []
+    cea = "+proj=cea +datum=WGS84"
+    rows = []
+    try:
+        riv_cea = rivers_gdf.to_crs(cea)
+    except Exception:
+        riv_cea = rivers_gdf
+    orders = sorted(rivers_gdf["order"].unique())
+    counts = {}
+    for ord_val in orders:
+        sub = riv_cea[rivers_gdf["order"] == ord_val]
+        total_m  = float(sub.geometry.length.sum())
+        counts[int(ord_val)] = len(sub)
+        rows.append({
+            "order":    int(ord_val),
+            "count":    len(sub),
+            "total_km": round(total_m / 1e3, 2),
+            "mean_km":  round(total_m / max(len(sub), 1) / 1e3, 3),
+        })
+    return rows
+
+
+# ── figure → base64 ─────────────────────────────────────────────────────────
+def _fig_to_b64(fig, dpi=150):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    buf.seek(0)
+    data = base64.b64encode(buf.read()).decode("ascii")
+    plt.close(fig)
+    return data
+
+
+# ── map image ─────────────────────────────────────────────────────────────────
+def _rpt_html_map(outlet_info, acc_thresh):
+    """Render the study-area map identical in style to the PNG export."""
+    import contextily as ctx
+
+    if not _cache or not _all_results:
+        return ""
+
+    RIVER_COLORS = ["#aacce8","#6aaed6","#3182bd","#1a5ea0","#0d3a78","#062050"]
+
+    dem_arr = _cache.get("dem_arr")
+    affine  = _cache["affine"]
+    nr = nc = 0
+    if dem_arr is not None:
+        nr, nc = dem_arr.shape
+
+    # ── Build catchment GeoDataFrames ──────────────────────────────────────
+    all_catches, all_outlet_feats = [], []
+    lookup = {int(o["id"]): o for o in outlet_info}
+    for i, r in enumerate(_all_results):
+        oid   = i + 1
+        info  = lookup.get(oid, {})
+        name  = (info.get("name") or "").strip() or f"Catchment {oid}"
+        color = info.get("color", "#3399ff")
+        for feat in r["catchment"]["features"]:
+            f2 = dict(feat)
+            f2["properties"] = {**f2.get("properties", {}),
+                                 "outlet_id": oid, "name": name, "color": color}
+            all_catches.append(f2)
+        for feat in r["outlet"]["features"]:
+            f2 = dict(feat)
+            f2["properties"] = {**f2.get("properties", {}),
+                                 "outlet_id": oid, "name": name, "color": color}
+            all_outlet_feats.append(f2)
+
+    catches_gdf = gpd.GeoDataFrame.from_features(all_catches,      crs=4326)
+    outlets_gdf = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+    catchment_union = catches_gdf.unary_union
+
+    # ── Extent: catchment bbox + 12 % padding, equal aspect ───────────────
+    tb  = catches_gdf.total_bounds          # [minx, miny, maxx, maxy]
+    pw  = (tb[2] - tb[0]) * 0.12
+    ph  = (tb[3] - tb[1]) * 0.12
+    xmin, xmax = tb[0] - pw, tb[2] + pw
+    ymin, ymax = tb[1] - ph, tb[3] + ph
+    # Force equal aspect (approx — figure is 14×10)
+    data_w, data_h = xmax - xmin, ymax - ymin
+    map_aspect = 14 * 0.82 / (10 * 0.80)
+    if data_w / max(data_h, 1e-9) < map_aspect:
+        delta = data_h * map_aspect - data_w
+        xmin -= delta / 2; xmax += delta / 2
+    else:
+        delta = data_w / map_aspect - data_h
+        ymin -= delta / 2; ymax += delta / 2
+
+    # ── Rivers clipped to catchment union ─────────────────────────────────
+    rivers_fc = extract_rivers_global(acc_thresh)
+    rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                       if rivers_fc.get("features") else gpd.GeoDataFrame())
+    rivers_gdf = (rivers_gdf_full.clip(catchment_union)
+                  if not rivers_gdf_full.empty else gpd.GeoDataFrame())
+
+    # ── Figure ─────────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(14, 10), facecolor="white")
+    ax  = fig.add_axes([0.09, 0.11, 0.82, 0.80])
+
+    ax.set_facecolor("#dde8f0")
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    # Basemap
+    try:
+        ctx.add_basemap(ax, crs="EPSG:4326",
+                        source=ctx.providers.CartoDB.Positron,
+                        attribution=False, zoom="auto")
+    except Exception:
+        pass
+    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+
+    ax.tick_params(labelsize=7, direction="out", color="#777")
+    ax.set_xlabel("Longitude (°E)", fontsize=8, color="#444", labelpad=4)
+    ax.set_ylabel("Latitude (°N)",  fontsize=8, color="#444", labelpad=4)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#888"); spine.set_linewidth(0.8)
+
+    # ── DEM hillshade clipped to catchment (identical to PNG export) ──────
+    if dem_arr is not None and nr > 0:
+        try:
+            _dem   = dem_arr.copy().astype(float)
+            _west  = affine.c
+            _east  = affine.c + affine.a * nc
+            _north = affine.f
+            _south = affine.f + affine.e * nr
+
+            _cmask = rasterio.features.rasterize(
+                [(catchment_union, 1)],
+                out_shape=(nr, nc),
+                transform=affine,
+                fill=0, dtype="uint8",
+            ).astype(bool)
+
+            _dem_c = np.where(_cmask & np.isfinite(_dem), _dem, np.nan)
+            _valid = np.isfinite(_dem_c)
+            if _valid.any():
+                _vmin = float(np.percentile(_dem_c[_valid], 2))
+                _vmax = float(np.percentile(_dem_c[_valid], 98))
+                if _vmax <= _vmin: _vmax = _vmin + 1.0
+                _dem_hs = np.where(_valid, _dem_c, _vmin)
+                _ls  = LightSource(azdeg=315, altdeg=40)
+                _rgb = _ls.shade(_dem_hs, cmap=plt.cm.gist_earth,
+                                 vmin=_vmin, vmax=_vmax,
+                                 blend_mode="soft", vert_exag=1.5)
+                _alpha = np.where(_cmask, 0.65, 0.0)
+                _rgba  = np.dstack([_rgb[..., :3], _alpha])
+                ax.imshow(_rgba, extent=[_west, _east, _south, _north],
+                          origin="upper", zorder=1, interpolation="bilinear",
+                          aspect="auto")
+        except Exception:
+            import traceback as _tb; _tb.print_exc()
+
+    # ── Catchment fills + dashed borders ──────────────────────────────────
+    for _, row in catches_gdf.iterrows():
+        color = row.get("color", "#3399ff")
+        gdf_r = gpd.GeoDataFrame([row], crs=4326)
+        gdf_r.plot(ax=ax, color=color, alpha=0.12, linewidth=0, zorder=2)
+        gdf_r.boundary.plot(ax=ax, color=color, linewidth=1.8,
+                            linestyle="--", zorder=3)
+
+    # ── Rivers clipped, colored by Strahler order ──────────────────────────
+    if not rivers_gdf.empty and "order" in rivers_gdf.columns:
+        for order in sorted(rivers_gdf["order"].unique()):
+            sub = rivers_gdf[rivers_gdf["order"] == order]
+            lw  = max(0.5, int(order) * 0.6 + 0.4)
+            sub.plot(ax=ax, color=RIVER_COLORS[min(int(order)-1, 5)],
+                     linewidth=lw, zorder=4)
+
+    # ── Outlet markers + labels ────────────────────────────────────────────
+    for _, row in outlets_gdf.iterrows():
+        color = row.get("color", "#e53935")
+        name  = row.get("name", f"Outlet {row.get('outlet_id','')}")
+        x, y  = row.geometry.x, row.geometry.y
+        ax.plot(x, y, "o", color=color, markersize=7,
+                markeredgecolor="white", markeredgewidth=1.5, zorder=6)
+        ax.annotate(
+            name, (x, y), textcoords="offset points", xytext=(8, 5),
+            fontsize=7.5, fontweight="bold", color="#1a2030", zorder=7,
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.85),
+        )
+
+    # ── Map furniture (north arrow, context map, legend) ───────────────────
+    _pm_north_arrow(ax)
+    _pm_locator_map(ax, catches_gdf, xmin, xmax, ymin, ymax)
+    _pm_legend(ax, outlet_info, rivers_gdf)
+
+    return _fig_to_b64(fig, dpi=180)
+
+
+
+# ── Strahler bar charts ───────────────────────────────────────────────────────
+def _rpt_html_strahler_charts(riv_stats):
+    if not riv_stats:
+        return ""
+    NAV = "#0d2440"; BLU = "#1d5c9e"; GRN = "#1a5c38"; BG = "#f8fafc"
+    orders  = [str(r["order"]) for r in riv_stats]
+    counts  = [r["count"]     for r in riv_stats]
+    lengths = [r["total_km"]  for r in riv_stats]
+    means   = [r["mean_km"]   for r in riv_stats]
+
+    def _ax_style(ax, title, xlabel, ylabel):
+        ax.set_title(title, fontsize=11, fontweight="bold", color=NAV, pad=10)
+        ax.set_xlabel(xlabel, fontsize=9, color="#445566")
+        ax.set_ylabel(ylabel, fontsize=9, color="#445566")
+        ax.set_facecolor(BG)
+        for sp in ["top", "right"]: ax.spines[sp].set_visible(False)
+        for sp in ["left", "bottom"]: ax.spines[sp].set_color("#ccddee")
+        ax.tick_params(colors="#445566", labelsize=8)
+        ax.yaxis.grid(True, color="#e0eaf4", linestyle="--", linewidth=0.5)
+        ax.set_axisbelow(True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4.5), facecolor="white")
+
+    ax = axes[0]
+    shades = plt.cm.Blues(np.linspace(0.45, 0.85, len(orders)))
+    bars = ax.bar(orders, counts, color=shades, width=0.6, edgecolor="white", linewidth=0.8)
+    _ax_style(ax, "Stream Segments by Order", "Strahler Order", "Number of Segments")
+    for b, v in zip(bars, counts):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+max(counts)*0.025,
+                str(v), ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=NAV)
+
+    ax = axes[1]
+    bars = ax.bar(orders, lengths, color=BLU, width=0.6, edgecolor="white", linewidth=0.8, alpha=0.85)
+    _ax_style(ax, "Total Length by Order", "Strahler Order", "Total Length (km)")
+    for b, v in zip(bars, lengths):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+max(lengths)*0.025,
+                f"{v:.1f}", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=NAV)
+
+    ax = axes[2]
+    bars = ax.bar(orders, means, color=GRN, width=0.6, edgecolor="white", linewidth=0.8, alpha=0.85)
+    _ax_style(ax, "Mean Segment Length by Order", "Strahler Order", "Mean Length (km)")
+    for b, v in zip(bars, means):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+max(means)*0.025,
+                f"{v:.2f}", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=GRN)
+
+    plt.tight_layout(pad=2.5)
+    return _fig_to_b64(fig, dpi=130)
+
+
+# ── Horton log-linear charts ──────────────────────────────────────────────────
+def _rpt_html_horton_chart(riv_stats):
+    if len(riv_stats) < 2:
+        return ""
+    NAV = "#0d2440"; BLU = "#1d5c9e"
+    orders  = [r["order"]    for r in riv_stats]
+    counts  = [r["count"]    for r in riv_stats]
+    lengths = [r["total_km"] for r in riv_stats]
+
+    def _style(ax, title):
+        ax.set_title(title, fontsize=11, fontweight="bold", color=NAV, pad=10)
+        ax.set_facecolor("#f8fafc")
+        for sp in ["top", "right"]: ax.spines[sp].set_visible(False)
+        for sp in ["left", "bottom"]: ax.spines[sp].set_color("#ccddee")
+        ax.tick_params(colors="#445566", labelsize=8)
+        ax.yaxis.grid(True, color="#e0eaf4", linestyle="--", linewidth=0.5)
+        ax.set_axisbelow(True)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5), facecolor="white")
+
+    ax1.semilogy(orders, counts, "o-", color=BLU, linewidth=2, markersize=7,
+                 markerfacecolor="white", markeredgewidth=2)
+    _style(ax1, "Horton's Law — Stream Numbers")
+    ax1.set_xlabel("Strahler Order", fontsize=9, color="#445566")
+    ax1.set_ylabel("Number of Streams (log scale)", fontsize=9, color="#445566")
+    ax1.set_xticks(orders)
+
+    ax2.semilogy(orders, lengths, "s-", color="#1a5c38", linewidth=2, markersize=7,
+                 markerfacecolor="white", markeredgewidth=2)
+    _style(ax2, "Horton's Law — Stream Lengths")
+    ax2.set_xlabel("Strahler Order", fontsize=9, color="#445566")
+    ax2.set_ylabel("Total Length (km, log scale)", fontsize=9, color="#445566")
+    ax2.set_xticks(orders)
+
+    plt.tight_layout(pad=2.5)
+    return _fig_to_b64(fig, dpi=130)
+
+
+# ── Elevation box plot ───────────────────────────────────────────────────────
+def _rpt_html_elev_chart(catch_stats):
+    """Scientific box plot of elevation distribution per catchment."""
+    # Collect raw elevation values masked to each catchment
+    stats_e = [s for s in catch_stats if s.get("elev")]
+    if not stats_e or not _cache or "dem_arr" not in _cache:
+        return ""
+
+    dem_arr = _cache["dem_arr"]
+    affine  = _cache["affine"]
+    nr, nc  = dem_arr.shape
+    all_catches = [feat for r in _all_results for feat in r["catchment"]["features"]]
+    if not all_catches:
+        return ""
+
+    box_data = []
+    labels   = []
+    colors   = []
+    try:
+        cg = gpd.GeoDataFrame.from_features(all_catches, crs=4326)
+        ids = sorted(cg["outlet_id"].unique()) if "outlet_id" in cg.columns else []
+        for oid in ids:
+            sub   = cg[cg["outlet_id"] == oid]
+            name  = str(sub.iloc[0].get("name", f"Catchment {oid}"))[:20]
+            color = str(sub.iloc[0].get("color", "#3399ff"))
+            geom  = sub.geometry.unary_union
+            mask  = rasterio.features.rasterize(
+                [(geom, 1)], out_shape=(nr, nc),
+                transform=affine, fill=0, dtype="uint8",
+            ).astype(bool)
+            vals = dem_arr[mask & np.isfinite(dem_arr)]
+            if len(vals) > 10:
+                # subsample to 50 k points for speed
+                if len(vals) > 50000:
+                    idx  = np.random.choice(len(vals), 50000, replace=False)
+                    vals = vals[idx]
+                box_data.append(vals)
+                labels.append(name)
+                colors.append(color)
+    except Exception:
+        import traceback; traceback.print_exc()
+        return ""
+
+    if not box_data:
+        return ""
+
+    NAV = "#0d2440"
+    n   = len(box_data)
+    fig, ax = plt.subplots(figsize=(max(5, n * 2.2 + 1.5), 5), facecolor="white")
+
+    bp = ax.boxplot(
+        box_data,
+        patch_artist=True,
+        notch=False,
+        vert=True,
+        widths=0.5,
+        medianprops=dict(color="#e53935", linewidth=2),
+        whiskerprops=dict(color="#445566", linewidth=1.2),
+        capprops=dict(color="#445566", linewidth=1.5),
+        flierprops=dict(marker=".", color="#aabbcc",
+                        markersize=2, alpha=0.4, linestyle="none"),
+        boxprops=dict(linewidth=1.2),
+    )
+    for patch, col in zip(bp["boxes"], colors):
+        import matplotlib.colors as mc
+        rgba = list(mc.to_rgba(col))
+        rgba[3] = 0.25
+        patch.set_facecolor(rgba)
+        patch.set_edgecolor(col)
+
+    ax.set_xticks(range(1, n + 1))
+    ax.set_xticklabels(labels, rotation=15 if n > 3 else 0, ha="right", fontsize=9)
+    ax.set_ylabel("Elevation (m a.s.l.)", fontsize=10)
+    ax.set_title("Catchment Elevation Distribution", fontsize=12,
+                 fontweight="bold", color=NAV, pad=10)
+    ax.set_facecolor("#f8fafc")
+    for sp in ["top", "right"]: ax.spines[sp].set_visible(False)
+    for sp in ["left", "bottom"]: ax.spines[sp].set_color("#ccddee")
+    ax.yaxis.grid(True, color="#e0eaf4", linestyle="--", linewidth=0.5)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors="#445566", labelsize=9)
+    plt.tight_layout()
+    return _fig_to_b64(fig, dpi=130)
+
+
+# ── HTML helpers
+
+# ── HTML helpers ──────────────────────────────────────────────────────────────
+def _he(s):
+    import html as _hm
+    return _hm.escape(str(s))
+
+
+def _build_html_report(title, author, date_str, catch_stats, riv_stats,
+                        dem_source, res_m, acc_thresh, map_b64,
+                        strahler_b64, elev_b64):
+
+    # aggregates
+    total_area = sum(s["area"]     for s in catch_stats)
+    total_riv  = sum(r["total_km"] for r in riv_stats)
+    max_order  = max((r["order"] for r in riv_stats), default=0)
+    n_catch    = len(catch_stats)
+    total_segs = sum(r["count"] for r in riv_stats)
+    dd  = round(total_riv / total_area, 3) if total_area else 0
+    fs  = round(total_segs / total_area, 3) if total_area else 0
+    lo  = round(1 / (2 * dd), 3) if dd else 0
+
+    # bifurcation ratios
+    bif_rows = []
+    rb_vals  = []
+    for i in range(len(riv_stats) - 1):
+        n1, n2 = riv_stats[i]["count"], riv_stats[i+1]["count"]
+        rb = round(n1 / n2, 2) if n2 else None
+        bif_rows.append((riv_stats[i]["order"], riv_stats[i+1]["order"], n1, n2, rb))
+        if rb:
+            rb_vals.append(rb)
+    mean_rb = round(sum(rb_vals) / len(rb_vals), 2) if rb_vals else None
+
+    def _interp_circ(rc):
+        if rc > 0.75: return "Near-circular — high runoff potential"
+        if rc > 0.50: return "Moderately elongated — moderate runoff"
+        return "Elongated — lower flood peaks, longer lag time"
+
+    def _interp_dd(d):
+        if d < 0.5:  return "Very coarse — permeable soils, low relief"
+        if d < 2.0:  return "Moderate — typical mixed terrain"
+        if d < 4.0:  return "Fine — impermeable soils, higher runoff"
+        return "Very fine — highly impermeable, flash-flood prone"
+
+    def _interp_rb(rb):
+        if rb is None: return "—"
+        if rb < 3:    return "< 3 — unusually low (check data)"
+        if rb <= 5:   return "3–5 — normal, homogeneous geology"
+        return "> 5 — structural / geological control"
+
+    def embed(b64, cls="chart-img"):
+        if not b64: return ""
+        return f'<img src="data:image/png;base64,{b64}" class="{cls}" alt="">'
+
+    # page chrome helper
+    def phdr(section, pn, tp):
+        return (f'<div class="page-header">'
+                f'<span class="report-title">{_he(title)}</span>'
+                f'<span class="page-label">{_he(section)}'
+                f' &nbsp;|&nbsp; Page {pn} of {tp}</span></div>')
+
+    def kpi(val, unit, label):
+        return (f'<div class="kpi-card">'
+                f'<div class="kpi-value">{_he(val)}'
+                f'<span class="kpi-unit">{_he(unit)}</span></div>'
+                f'<div class="kpi-label">{_he(label)}</div></div>')
+
+    TP = 5  # total pages
+
+    # ── PAGE 1: COVER ─────────────────────────────────────────────────────────
+    cover_rows = ""
+    for s in catch_stats:
+        dot     = f'<span class="color-dot" style="background:{_he(s["color"])}"></span>'
+        e       = s.get("elev", {})
+        elev_s  = f'{e["min"]:.0f}–{e["max"]:.0f} m' if e else "—"
+        cover_rows += (
+            f'<tr><td>{dot}{_he(s["name"])}</td>'
+            f'<td class="num">{s["area"]:,.2f}</td>'
+            f'<td class="num">{s["perim"]:,.1f}</td>'
+            f'<td class="num">{s["circ"]:.3f}</td>'
+            f'<td class="num">{s["elong"]:.3f}</td>'
+            f'<td>{elev_s}</td></tr>'
+        )
+
+    p1 = f"""
+<div class="page">
+  <div class="cover-hero">
+    <div class="cover-eyebrow">Hydrological Catchment Analysis Report</div>
+    <div class="cover-h1">{_he(title)}</div>
+    <div class="cover-meta">
+      <span>{_he(author) if author else ""}</span>
+      <span>{_he(date_str)}</span>
+      <span>{n_catch} catchment{"s" if n_catch != 1 else ""} delineated</span>
+    </div>
+  </div>
+  <div class="kpi-row">
+    {kpi(f"{total_area:,.1f}", " km²", "Total Area")}
+    {kpi(f"{total_riv:,.1f}", " km", "Total River Length")}
+    {kpi(str(max_order), "", "Max Strahler Order")}
+    {kpi(str(total_segs), "", "Stream Segments")}
+    {kpi(f"{dd}", " km/km²", "Drainage Density")}
+    {kpi(f"{res_m}", " m", "DEM Resolution")}
+  </div>
+  <div class="page-body">
+    <div class="section-title">Summary</div>
+    <div class="info-box">
+      <strong>DEM Source:</strong> {_he(dem_source)} &nbsp;·&nbsp;
+      <strong>Resolution:</strong> {res_m} m &nbsp;·&nbsp;
+      <strong>Drainage Density:</strong> {dd} km/km² &nbsp;·&nbsp;
+      <strong>Stream Frequency:</strong> {fs} /km² &nbsp;·&nbsp;
+      <strong>Mean Bifurcation Ratio:</strong> {mean_rb if mean_rb else "—"}
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Catchment</th><th>Area (km²)</th><th>Perimeter (km)</th>
+          <th>Circularity Rc</th><th>Elongation Re</th><th>Elevation Range</th>
+        </tr></thead>
+        <tbody>{cover_rows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:12px;color:#9aa;margin-top:12px">
+      Generated by Catchment Delineation Tool &nbsp;·&nbsp; {_he(date_str)}
+    </p>
+  </div>
+</div>"""
+
+    # ── PAGE 2: MAP ────────────────────────────────────────────────────────────
+    outlet_rows = ""
+    for s in catch_stats:
+        dot   = f'<span class="color-dot" style="background:{_he(s["color"])}"></span>'
+        lat_s = f'{s["lat"]:.5f}' if s.get("lat") is not None else "—"
+        lon_s = f'{s["lon"]:.5f}' if s.get("lon") is not None else "—"
+        outlet_rows += (
+            f'<tr><td>{dot}{_he(s["name"])}</td>'
+            f'<td class="num">{lat_s}</td>'
+            f'<td class="num">{lon_s}</td>'
+            f'<td class="num">{s["area"]:,.2f}</td></tr>'
+        )
+
+    p2 = f"""
+<div class="page">
+  {phdr("Study Area Map", 2, TP)}
+  <div class="page-body">
+    <div class="section-title">Study Area Map</div>
+    <div class="section-subtitle">DEM hillshade · delineated catchment boundaries · stream network</div>
+    {embed(map_b64, "map-img")}
+    <p class="fig-caption">
+      Figure 1. Delineated catchment(s) overlaid on DEM hillshade (CartoDB Positron basemap).
+      Red circles mark outlet locations. River network line weight scales with Strahler order.
+      Source: {_he(dem_source)}.
+    </p>
+    <div class="tbl-wrap" style="margin-top:20px">
+      <table>
+        <thead><tr>
+          <th>Catchment</th><th>Outlet Latitude</th><th>Outlet Longitude</th><th>Area (km²)</th>
+        </tr></thead>
+        <tbody>{outlet_rows}</tbody>
+      </table>
+    </div>
+  </div>
+</div>"""
+
+    # ── PAGE 3: MORPHOMETRICS ──────────────────────────────────────────────────
+    morph_rows = ""
+    for s in catch_stats:
+        dot = f'<span class="color-dot" style="background:{_he(s["color"])}"></span>'
+        lb  = s["perim"] / math.pi if s["perim"] else 1
+        ff  = round(s["area"] / (lb ** 2), 4) if lb else 0
+        morph_rows += (
+            f'<tr><td>{dot}{_he(s["name"])}</td>'
+            f'<td class="num">{s["area"]:,.2f}</td>'
+            f'<td class="num">{s["perim"]:,.2f}</td>'
+            f'<td class="num">{s["circ"]:.3f}</td>'
+            f'<td class="num">{s["elong"]:.3f}</td>'
+            f'<td class="num">{ff:.4f}</td>'
+            f'<td style="font-size:11px;color:#5a6a7a">{_interp_circ(s["circ"])}</td></tr>'
+        )
+
+    elev_rows = ""
+    for s in catch_stats:
+        dot = f'<span class="color-dot" style="background:{_he(s["color"])}"></span>'
+        e   = s.get("elev", {})
+        if e:
+            rng = round(e["max"] - e["min"], 1)
+            elev_rows += (
+                f'<tr><td>{dot}{_he(s["name"])}</td>'
+                f'<td class="num">{e["min"]:.1f}</td>'
+                f'<td class="num">{e["mean"]:.1f}</td>'
+                f'<td class="num">{e["max"]:.1f}</td>'
+                f'<td class="num">{e.get("std", 0):.1f}</td>'
+                f'<td class="num">{rng:.1f}</td></tr>'
+            )
+        else:
+            elev_rows += (
+                f'<tr><td>{dot}{_he(s["name"])}</td>'
+                f'<td class="num" colspan="5">No elevation data</td></tr>'
+            )
+
+    p3 = f"""
+<div class="page">
+  {phdr("Morphometric Analysis", 3, TP)}
+  <div class="page-body">
+    <div class="section-title">Catchment Morphometric Analysis</div>
+    <div class="section-subtitle">
+      Areal, linear and relief parameters following Horton (1945), Miller (1953) and Schumm (1956)
+    </div>
+
+    <h3 class="sub-h">Shape &amp; Areal Parameters</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Catchment</th><th>Area (km²)</th><th>Perimeter (km)</th>
+          <th>Circularity R<sub>c</sub></th><th>Elongation R<sub>e</sub></th>
+          <th>Form Factor F<sub>f</sub></th><th>Interpretation</th>
+        </tr></thead>
+        <tbody>{morph_rows}</tbody>
+      </table>
+    </div>
+    <div class="info-box">
+      R<sub>c</sub> = 4π·A/P² &nbsp;|&nbsp; R<sub>e</sub> = (2/L)·√(A/π) &nbsp;|&nbsp; F<sub>f</sub> = A/L²<br>
+      <span style="font-size:12px;color:#3a5a7a">
+        R<sub>c</sub> &gt; 0.75 = circular, high runoff &nbsp;|&nbsp;
+        R<sub>e</sub> &gt; 0.9 = circular &nbsp;|&nbsp;
+        R<sub>e</sub> 0.5–0.7 = elongated &nbsp;|&nbsp;
+        High F<sub>f</sub> = compact basin, higher peak discharge
+      </span>
+    </div>
+
+    <h3 class="sub-h">Basin-wide Linear Parameters</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Parameter</th><th>Symbol</th><th class="num">Value</th><th>Unit</th><th>Interpretation</th>
+        </tr></thead>
+        <tbody>
+          <tr><td>Drainage Density</td><td><i>D<sub>d</sub></i></td>
+              <td class="num">{dd}</td><td>km/km²</td>
+              <td style="font-size:11px;color:#5a6a7a">{_interp_dd(dd)}</td></tr>
+          <tr><td>Stream Frequency</td><td><i>F<sub>s</sub></i></td>
+              <td class="num">{fs}</td><td>/km²</td>
+              <td style="font-size:11px;color:#5a6a7a">Higher → greater basin dissection &amp; surface runoff</td></tr>
+          <tr><td>Length of Overland Flow</td><td><i>L<sub>o</sub></i></td>
+              <td class="num">{lo}</td><td>km</td>
+              <td style="font-size:11px;color:#5a6a7a">Mean travel distance before entering a channel ≈ 1/(2D<sub>d</sub>)</td></tr>
+          <tr><td>Mean Bifurcation Ratio</td><td><i>R&#773;<sub>b</sub></i></td>
+              <td class="num">{mean_rb if mean_rb else "—"}</td><td>—</td>
+              <td style="font-size:11px;color:#5a6a7a">{_interp_rb(mean_rb)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-h">Elevation Statistics</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Catchment</th><th>Min (m)</th><th>Mean (m)</th>
+          <th>Max (m)</th><th>Std Dev (m)</th><th>Relief (m)</th>
+        </tr></thead>
+        <tbody>{elev_rows}</tbody>
+      </table>
+    </div>
+    {embed(elev_b64)}
+    <p class="fig-caption">Figure 2. Catchment elevation range — diamonds = mean; bars = min/max.</p>
+  </div>
+</div>"""
+
+    # ── PAGE 4: RIVER NETWORK ──────────────────────────────────────────────────
+    strahler_rows = ""
+    for i, r in enumerate(riv_stats):
+        rb_str = str(bif_rows[i][4]) if i < len(bif_rows) and bif_rows[i][4] else "—"
+        strahler_rows += (
+            f'<tr><td style="font-weight:700;color:#0d2440">Order {r["order"]}</td>'
+            f'<td class="num">{r["count"]}</td>'
+            f'<td class="num">{r["total_km"]:,.2f}</td>'
+            f'<td class="num">{r["mean_km"]:.3f}</td>'
+            f'<td class="num">{rb_str}</td></tr>'
+        )
+    strahler_rows += (
+        f'<tr style="font-weight:700;background:#e8f0fb">'
+        f'<td>Total</td><td class="num">{total_segs}</td>'
+        f'<td class="num">{total_riv:,.2f}</td><td class="num">—</td>'
+        f'<td class="num">{mean_rb if mean_rb else "—"} (mean)</td></tr>'
+    )
+
+    if mean_rb:
+        if mean_rb < 3:
+            bif_interp = "The mean bifurcation ratio is below 3, which may indicate flat terrain or a disturbed drainage network."
+        elif mean_rb <= 5:
+            bif_interp = (f"A mean R&#773;<sub>b</sub> of {mean_rb} is within the normal range (3–5), "
+                          "indicating homogeneous geology with limited structural control on drainage.")
+        else:
+            bif_interp = (f"A mean R&#773;<sub>b</sub> of {mean_rb} exceeds 5, suggesting strong structural "
+                          "or geological control, or an elongated basin geometry.")
+    else:
+        bif_interp = "Insufficient orders to compute bifurcation ratio."
+
+    p4 = f"""
+<div class="page">
+  {phdr("River Network Analysis", 4, TP)}
+  <div class="page-body">
+    <div class="section-title">River Network Analysis</div>
+    <div class="section-subtitle">Strahler ordering · bifurcation ratios · Horton's laws of drainage composition</div>
+
+    <p style="font-size:13px;margin-bottom:18px">
+      Stream ordering follows the <strong>Strahler (1952)</strong> system. First-order streams are
+      fingertip tributaries carrying no tributaries. When two streams of equal order meet, the
+      downstream reach takes the next higher order. The Strahler order at the outlet defines the
+      overall order of the catchment.
+    </p>
+
+    <h3 class="sub-h">Stream Network Statistics by Order</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr>
+          <th>Stream Order</th><th>Segment Count</th><th>Total Length (km)</th>
+          <th>Mean Length (km)</th><th>Bifurcation Ratio R<sub>b</sub></th>
+        </tr></thead>
+        <tbody>{strahler_rows}</tbody>
+      </table>
+    </div>
+    <p style="font-size:11px;color:#7a8a9a;margin-bottom:18px">
+      R<sub>b</sub>(n) = N<sub>n</sub> / N<sub>n+1</sub>.
+      Normal range 3–5 (Strahler 1957). Values &gt; 5 indicate structural control or elongated basin.
+    </p>
+
+    {embed(strahler_b64)}
+    <p class="fig-caption">Figure 3. Stream segment count, total length, and mean segment length by Strahler order.</p>
+
+    <div class="info-box" style="margin-top:24px">
+      <strong>Bifurcation analysis:</strong> {bif_interp}<br>
+      <strong>Drainage density D<sub>d</sub></strong> = {dd} km/km² — {_interp_dd(dd).lower()}.<br>
+      <strong>Stream frequency F<sub>s</sub></strong> = {fs} /km²
+      {'— high dissection, significant surface runoff.' if fs > 2 else '— moderate to low dissection.'}
+    </div>
+
+
+  </div>
+</div>"""
+
+    # ── PAGE 5: METHODOLOGY ────────────────────────────────────────────────────
+    p5 = f"""
+<div class="page">
+  {phdr("Methodology & References", 5, TP)}
+  <div class="page-body">
+    <div class="section-title">Methodology, Parameters &amp; Data Sources</div>
+    <div class="section-subtitle">
+      Complete processing pipeline with all hyperparameters, thresholds, and design decisions
+    </div>
+
+    <h3 class="sub-h">Data Sources</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Dataset</th><th>Source</th><th>Resolution / Scale</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>Digital Elevation Model</td><td>{_he(dem_source)}</td><td>{res_m} m</td><td>Terrain, flow routing, morphometry</td></tr>
+          <tr><td>Basemap tiles</td><td>CartoDB Positron (via contextily)</td><td>Web tiles</td><td>Cartographic background</td></tr>
+          <tr><td>Country boundaries</td><td>Natural Earth 110 m</td><td>1:110,000,000</td><td>Context map inset</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-h">Run Parameters (this analysis)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Value Used</th><th>Effect / Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>DEM resolution</td><td><strong>{res_m} m</strong></td>
+              <td>Pixel size of the elevation grid. Finer = more detail but slower conditioning.</td></tr>
+          <tr><td>Flow accumulation threshold</td><td><strong>{acc_thresh} cells</strong>
+              &nbsp;≈ {round(acc_thresh * res_m * res_m / 1e6, 3)} km²</td>
+              <td>Minimum upstream area for a cell to be classified as a stream channel.
+                  Lower → denser network; higher → only main channels. Typical range: 200–2000 cells.</td></tr>
+          <tr><td>Walling elevation offset</td><td><strong>max(DEM) + 5 000 m</strong></td>
+              <td>Cells outside the user-drawn polygon are raised to this value so flow cannot
+                  leak across the boundary during depression filling.</td></tr>
+          <tr><td>D8 direction mapping</td><td><strong>ESRI / TauDEM convention</strong>
+              (1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE)</td>
+              <td>Each cell is assigned one of 8 cardinal/diagonal flow directions.</td></tr>
+          <tr><td>Chaikin smoothing iterations</td><td><strong>3 passes</strong></td>
+              <td>Corner-cutting algorithm applied to river polylines to remove staircase
+                  artefacts from raster skeletonisation. Each pass cuts 25/75 % points.</td></tr>
+          <tr><td>Catchment extent padding</td><td><strong>12 % on each side</strong></td>
+              <td>Map extent extended beyond the catchment bounding box for cartographic context.</td></tr>
+          <tr><td>Morphometric projection</td><td><strong>Cylindrical Equal-Area (+proj=cea +datum=WGS84)</strong></td>
+              <td>Equal-area projection for accurate km² / km measurements independent of latitude.</td></tr>
+          <tr><td>Elevation percentile range</td><td><strong>2nd – 98th percentile</strong></td>
+              <td>Colour stretch limits for DEM hillshade to suppress outliers at cloud/void edges.</td></tr>
+          <tr><td>DEM hillshade azimuth / altitude</td><td><strong>315° / 40°</strong></td>
+              <td>Illumination angle (NW sun, standard cartographic convention) and sun elevation.</td></tr>
+          <tr><td>Hillshade blend opacity</td><td><strong>65 %</strong></td>
+              <td>Alpha of DEM layer over the CartoDB basemap — enough to show relief without obscuring labels.</td></tr>
+          <tr><td>Vertical exaggeration</td><td><strong>1.5×</strong></td>
+              <td>Applied to the hillshade surface for visual relief; does not affect metric calculations.</td></tr>
+          <tr><td>Outlet snapping</td><td><strong>Snap to highest-accumulation cell within search radius</strong></td>
+              <td>User-placed outlet is moved to the nearest high-accumulation cell to ensure
+                  it lies on the modelled channel and not on an inter-fluve.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-h">Processing Pipeline</h3>
+    <ol class="steps-list">
+      <li>
+        <strong>DEM acquisition &amp; normalisation</strong> —
+        Elevation data downloaded from {_he(dem_source)} for the user-defined polygon extent.
+        NoData values (≤ −9990, ≤ −32767, &gt; 9000 m) and any tagged nodata pixels are masked to NaN.
+      </li>
+      <li>
+        <strong>CRS assignment</strong> —
+        If the input raster has no embedded coordinate reference system, WGS84 (EPSG:4326)
+        is assumed and written into the file metadata.
+      </li>
+      <li>
+        <strong>Boundary walling</strong> —
+        Cells outside the drawn polygon are set to
+        <em>max(DEM) + 5 000 m</em>, creating an impenetrable wall.
+        This prevents the depression-filling algorithm from routing flow across the
+        study boundary and ensures that all delineated catchments remain
+        entirely within the user-specified area of interest.
+      </li>
+      <li>
+        <strong>Pit filling</strong> (<code>pysheds.Grid.fill_pits</code>) —
+        Single-cell depressions (pits) — isolated pixels lower than all 8 neighbours — are
+        raised to the minimum neighbouring elevation so D8 routing can proceed
+        without terminating at isolated sinks.
+      </li>
+      <li>
+        <strong>Depression filling</strong> (<code>pysheds.Grid.fill_depressions</code>) —
+        Multi-cell enclosed basins are resolved using the <strong>priority-flood algorithm</strong>
+        (Planchon &amp; Darboux 2001). The algorithm uses a min-heap priority queue to flood
+        depressions from their lowest pour point upward, guaranteeing a continuous flow path
+        from every cell to the boundary. This is the most computationally expensive step
+        (O(N log N), visits every cell at least once); for a {res_m} m DEM at this extent
+        it typically dominates total processing time.
+      </li>
+      <li>
+        <strong>Flat resolution</strong> (<code>pysheds.Grid.resolve_flats</code>) —
+        After depression filling, large plateau areas have no elevation gradient and cannot
+        be assigned a unique D8 direction. A small artificial gradient is added following the
+        Barnes et al. (2014) approach, ensuring flow is directed away from high ground
+        and towards pour points.
+      </li>
+      <li>
+        <strong>D8 flow direction</strong> (<code>pysheds.Grid.flowdir</code>) —
+        Each raster cell is assigned a flow direction to the steepest of its 8 neighbouring
+        cells. Power-of-two encoding is used (1, 2, 4, 8, 16, 32, 64, 128 for E→NE clockwise).
+        Ties are broken by the first direction encountered in scanning order.
+      </li>
+      <li>
+        <strong>Flow accumulation</strong> (<code>pysheds.Grid.accumulation</code>) —
+        A topological traversal (from highest to lowest cell) counts the number of upstream
+        contributing cells for every pixel. The resulting raster is the primary input for
+        both stream network extraction and outlet snapping.
+      </li>
+      <li>
+        <strong>Outlet snapping</strong> —
+        The user-placed outlet point is relocated to the cell with the highest flow
+        accumulation within a local search window, ensuring it sits on the modelled channel
+        rather than on an adjacent hillslope cell.
+      </li>
+      <li>
+        <strong>Catchment delineation</strong> (<code>pysheds.Grid.catchment</code>) —
+        Starting from the snapped outlet, the flow-direction grid is traced upstream
+        (breadth-first search) to identify all contributing cells.
+        The resulting binary raster is vectorised to a polygon.
+      </li>
+      <li>
+        <strong>Stream network extraction</strong> —
+        Cells with flow accumulation ≥ <strong>{acc_thresh} cells</strong>
+        (≈ {round(acc_thresh * res_m * res_m / 1e6, 3)} km²) are classified as stream channels.
+        Connected groups of channel cells are skeletonised and traced into polyline segments
+        by following the highest-accumulation neighbour at each junction.
+        Segments are then smoothed using <strong>Chaikin corner-cutting (3 iterations)</strong>
+        to remove staircase artefacts from the raster skeleton.
+      </li>
+      <li>
+        <strong>Strahler stream ordering</strong> —
+        Order 1 is assigned to all first-order tributaries (segments with no upstream tributaries).
+        When two segments of equal order n meet, the downstream segment receives order n+1.
+        When two segments of unequal order meet, the downstream segment inherits the higher order.
+        This is computed as a recursive traversal of the extracted network graph.
+      </li>
+      <li>
+        <strong>Morphometric computation</strong> —
+        Basin area and perimeter are computed in the
+        <strong>Cylindrical Equal-Area projection</strong>
+        (<code>+proj=cea +datum=WGS84</code>) to ensure accurate measurements at any latitude.
+        Elevation statistics are derived from the raw DEM pixel values masked to the
+        catchment polygon, using the 2nd and 98th percentile to exclude voids.
+      </li>
+    </ol>
+
+    <h3 class="sub-h">Morphometric Formulas Reference</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Symbol</th><th>Formula</th><th>Typical range</th><th>Reference</th></tr></thead>
+        <tbody>
+          <tr><td>Circularity ratio</td><td>R<sub>c</sub></td><td>4π·A / P²</td><td>0–1 (1 = circle)</td><td>Miller (1953)</td></tr>
+          <tr><td>Elongation ratio</td><td>R<sub>e</sub></td><td>(2/L<sub>b</sub>)·√(A/π)</td><td>0.6–1.0</td><td>Schumm (1956)</td></tr>
+          <tr><td>Form factor</td><td>F<sub>f</sub></td><td>A / L<sub>b</sub>²</td><td>0–0.79</td><td>Horton (1932)</td></tr>
+          <tr><td>Drainage density</td><td>D<sub>d</sub></td><td>Σ L<sub>u</sub> / A</td><td>0.5–10 km/km²</td><td>Horton (1945)</td></tr>
+          <tr><td>Stream frequency</td><td>F<sub>s</sub></td><td>Σ N<sub>u</sub> / A</td><td>varies</td><td>Horton (1945)</td></tr>
+          <tr><td>Length of overland flow</td><td>L<sub>o</sub></td><td>1 / (2 D<sub>d</sub>)</td><td>—</td><td>Horton (1945)</td></tr>
+          <tr><td>Bifurcation ratio</td><td>R<sub>b</sub></td><td>N<sub>u</sub> / N<sub>u+1</sub></td><td>3–5 (normal)</td><td>Strahler (1957)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-h">Software &amp; Libraries</h3>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Library</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td>pysheds</td><td>DEM conditioning, D8 flow direction, accumulation, catchment delineation</td></tr>
+          <tr><td>rasterio</td><td>Raster I/O, coordinate transforms, polygon rasterisation</td></tr>
+          <tr><td>geopandas / shapely</td><td>Vector operations, area/perimeter in equal-area projection, river clipping</td></tr>
+          <tr><td>numpy</td><td>Array-level DEM manipulation and statistics</td></tr>
+          <tr><td>matplotlib</td><td>Map rendering, chart generation, PDF/PNG output</td></tr>
+          <tr><td>contextily</td><td>Web map tile retrieval (CartoDB Positron basemap)</td></tr>
+          <tr><td>Flask</td><td>Web application server and API endpoints</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="sub-h">References</h3>
+    <ul class="refs">
+      <li>Barnes, R., Lehman, C. &amp; Mulla, D. (2014). Priority-flood: An optimal depression-filling and watershed-labeling algorithm for digital elevation models. <em>Computers &amp; Geosciences</em>, 62, 117–127.</li>
+      <li>Horton, R.E. (1932). Drainage basin characteristics. <em>Trans. Am. Geophys. Union</em>, 13, 350–361.</li>
+      <li>Horton, R.E. (1945). Erosional development of streams and their drainage basins. <em>Bull. Geol. Soc. Am.</em>, 56, 275–370.</li>
+      <li>Miller, V.C. (1953). A quantitative geomorphic study of drainage basin characteristics in the Clinch Mountain area, Virginia and Tennessee. <em>Technical Report</em>, Columbia University.</li>
+      <li>Planchon, O. &amp; Darboux, F. (2001). A fast, simple and versatile algorithm to fill the depressions of digital elevation models. <em>Catena</em>, 46(2–3), 159–176.</li>
+      <li>Schumm, S.A. (1956). Evolution of drainage systems and slopes in badlands at Perth Amboy, New Jersey. <em>Bull. Geol. Soc. Am.</em>, 67, 597–646.</li>
+      <li>Strahler, A.N. (1952). Hypsometric (area-altitude) analysis of erosional topography. <em>Bull. Geol. Soc. Am.</em>, 63, 1117–1142.</li>
+      <li>Strahler, A.N. (1957). Quantitative analysis of watershed geomorphology. <em>Trans. Am. Geophys. Union</em>, 38, 913–920.</li>
+    </ul>
+
+    <p style="font-size:11px;color:#aab;margin-top:28px;text-align:center">
+      Generated by Catchment Delineation Tool &nbsp;·&nbsp; {_he(date_str)}
+    </p>
+  </div>
+</div>"""
+
+
+    # ── CSS ────────────────────────────────────────────────────────────────────
+    css = """
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+      background: #eef2f7;
+      color: #1a2030;
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .page {
+      max-width: 980px;
+      margin: 32px auto;
+      background: #ffffff;
+      box-shadow: 0 2px 24px rgba(0,0,0,.11);
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    .page-header {
+      background: #0d2440;
+      color: #fff;
+      padding: 14px 36px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .page-header .report-title { font-size: 12.5px; font-weight: 600; opacity: .9; }
+    .page-header .page-label   { font-size: 11.5px; color: #7ab0d0; }
+    .page-body { padding: 36px 40px; }
+    .section-title {
+      font-size: 21px; font-weight: 800; color: #0d2440;
+      padding-bottom: 8px; border-bottom: 3px solid #1d5c9e;
+      margin-bottom: 4px;
+    }
+    .section-subtitle { font-size: 13px; color: #7a8a9a; margin-bottom: 24px; }
+    .sub-h { font-size: 14px; font-weight: 700; color: #0d2440; margin: 22px 0 10px; }
+
+    /* cover */
+    .cover-hero {
+      background: linear-gradient(135deg, #0d2440 0%, #1d4a8a 100%);
+      color: #fff; padding: 52px 48px 44px;
+    }
+    .cover-eyebrow { font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: #7ab0d0; margin-bottom: 12px; }
+    .cover-h1 { font-size: 30px; font-weight: 800; line-height: 1.2; margin-bottom: 14px; }
+    .cover-meta { font-size: 13px; color: #b0c8e4; }
+    .cover-meta span { margin-right: 22px; }
+
+    /* KPI row */
+    .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 14px;
+      padding: 24px 40px 28px;
+      background: #f4f7fb;
+    }
+    .kpi-card { background: #fff; border: 1px solid #dde4f0; border-radius: 6px; padding: 16px 18px; text-align: center; }
+    .kpi-value { font-size: 24px; font-weight: 800; color: #0d2440; }
+    .kpi-unit  { font-size: 11px; color: #7a8a9a; margin-left: 2px; }
+    .kpi-label { font-size: 10.5px; color: #7a8a9a; margin-top: 4px; text-transform: uppercase; letter-spacing: .06em; }
+
+    /* tables */
+    .tbl-wrap { overflow-x: auto; margin: 14px 0 22px; border-radius: 5px; border: 1px solid #dde4f0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th { background: #0d2440; color: #fff; padding: 9px 13px; text-align: left; font-weight: 600; font-size: 11.5px; letter-spacing: .04em; white-space: nowrap; }
+    tbody tr:nth-child(even) { background: #f4f7fb; }
+    tbody tr:hover           { background: #e8f0fb; }
+    tbody td { padding: 8px 13px; border-bottom: 1px solid #edf0f6; vertical-align: middle; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .color-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+
+    /* callouts */
+    .info-box { background: #edf4ff; border-left: 4px solid #1d5c9e; padding: 13px 17px; border-radius: 0 4px 4px 0; font-size: 13px; color: #1a3050; margin: 14px 0 22px; }
+
+    /* images */
+    .chart-img { width: 100%; height: auto; display: block; border-radius: 4px; margin: 14px 0; }
+    .map-img   { width: 100%; height: auto; display: block; border-radius: 4px; }
+    .fig-caption { font-size: 11.5px; color: #7a8a9a; text-align: center; margin-top: 6px; margin-bottom: 22px; font-style: italic; }
+
+    /* steps & refs */
+    .steps-list { padding-left: 22px; font-size: 13px; }
+    .steps-list li { margin: 7px 0; }
+    .steps-list code { background: #f0f4f8; padding: 1px 5px; border-radius: 3px; font-size: 12px; font-family: Consolas, monospace; }
+    .refs { padding-left: 20px; font-size: 12.5px; color: #445566; line-height: 2; }
+
+    /* top bar */
+    .top-bar { text-align: center; padding: 12px; background: #0d2440; color: #fff; font-size: 12.5px; }
+    .top-bar strong { color: #7ab0d0; }
+
+    /* print */
+    @media print {
+      body { background: #fff; }
+      .top-bar { display: none; }
+      .page { box-shadow: none; margin: 0; border-radius: 0; page-break-after: always; max-width: 100%; }
+      .page:last-child { page-break-after: avoid; }
+    }
+    """
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_he(title)} — Catchment Report</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="top-bar">
+  &#128196; &nbsp;<strong>Catchment Analysis Report</strong> &nbsp;·&nbsp;
+  Use your browser's <strong>Print</strong> (Ctrl+P / Cmd+P) to save as PDF
+</div>
+{p1}
+{p2}
+{p3}
+{p4}
+{p5}
+</body>
+</html>"""
+
+
+# ── Flask route ────────────────────────────────────────────────────────────────
+@app.route("/api/report", methods=["POST"])
+def api_report():
+    """Generate a full HTML report and return it as a downloadable file."""
+    from flask import Response
+    data = request.json or {}
+    if not _all_results:
+        return jsonify({"error": "No delineation results to report."}), 400
+
+    title       = data.get("title",  "Catchment Analysis Report")
+    author      = data.get("author", "")
+    outlet_info = data.get("outlets", [])
+    acc_thresh  = int(data.get("acc_threshold", 500))
+    dem_source  = _dem_progress.get("source", "SRTM GL1 (30 m)")
+    res_m       = round(abs(_cache["affine"].a) * 111320, 1) if _cache else 30
+    date_str    = datetime.datetime.now().strftime("%d %B %Y")
+
+    try:
+        all_catches, all_outlet_feats = [], []
+        lookup = {int(o["id"]): o for o in outlet_info}
+        for i, r in enumerate(_all_results):
+            oid   = i + 1
+            info  = lookup.get(oid, {})
+            name  = (info.get("name") or "").strip() or f"Catchment {oid}"
+            color = info.get("color", "#3399ff")
+            for feat in r["catchment"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_catches.append(f2)
+            for feat in r["outlet"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_outlet_feats.append(f2)
+
+        catches_gdf = gpd.GeoDataFrame.from_features(all_catches,      crs=4326)
+        outlets_gdf = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+        rivers_fc   = extract_rivers_global(acc_thresh)
+        rivers_gdf  = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                       if rivers_fc.get("features") else gpd.GeoDataFrame())
+
+        catch_stats  = _rpt_compute_stats(catches_gdf, outlets_gdf)
+        riv_stats    = _rpt_compute_river_stats(rivers_gdf)
+        map_b64      = _rpt_html_map(outlet_info, acc_thresh)
+        strahler_b64 = _rpt_html_strahler_charts(riv_stats)
+        elev_b64     = _rpt_html_elev_chart(catch_stats)
+
+        html_str = _build_html_report(
+            title, author, date_str,
+            catch_stats, riv_stats,
+            dem_source, res_m, acc_thresh,
+            map_b64, strahler_b64, elev_b64,
+        )
+
+        safe = "".join(c for c in title if c.isalnum() or c in " _-")[:40].strip()
+        return Response(
+            html_str,
+            mimetype="text/html",
+            headers={"Content-Disposition": f'attachment; filename="{safe}_report.html"'}
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/upload_shapefile", methods=["POST"])

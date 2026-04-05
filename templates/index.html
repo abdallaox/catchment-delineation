@@ -264,6 +264,18 @@
     .modal-field select option { background:var(--panel); }
     .btn-print { background:#1a5c38; color:#fff; }
     .btn-print:hover { background:#1f7046; }
+    .btn-report { background:#1a3a5c; color:#7ab4e0; border:1px solid #1e4a6e; }
+    .btn-report:hover:not(:disabled) { background:#1e4a7a; }
+    .btn-report:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+
+    /* Report modal */
+    #report-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72);
+                    z-index:10000; align-items:center; justify-content:center; }
+    #report-modal.on { display:flex; }
+    #report-modal-inner { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+                          padding:22px 24px; width:340px; }
+    #report-modal-inner h3 { color:var(--accent); font-size:14px; margin-bottom:16px; }
+    .modal-actions { display:flex; gap:8px; margin-top:6px; }
 
     /* Leaflet overrides */
     .leaflet-control-zoom a { background:var(--panel) !important; color:var(--accent) !important; border-color:var(--border) !important; }
@@ -412,6 +424,9 @@
     <div class="sec-title">Export results</div>
     <button class="btn btn-print" style="margin-bottom:7px;" onclick="openPrintModal()">
       &#128438;&nbsp; Print Map (PNG)
+    </button>
+    <button class="btn btn-report" style="margin-bottom:7px;" onclick="openReportModal()" id="report-btn" disabled>
+      &#128196;&nbsp; Export Report (PDF)
     </button>
     <button class="btn btn-gpkg" onclick="exportResult('gpkg')">
       &#8659;&nbsp; GeoPackage (.gpkg) — open in QGIS
@@ -578,6 +593,25 @@
   </div>
 </div>
 
+<!-- Report modal -->
+<div id="report-modal">
+  <div id="report-modal-inner">
+    <h3>&#128196;&nbsp; Generate Report</h3>
+    <div class="modal-field">
+      <label>Report Title</label>
+      <input id="report-title" type="text" placeholder="Catchment Analysis Report" value="Catchment Analysis Report"/>
+    </div>
+    <div class="modal-field">
+      <label>Author / Organisation <span style="color:var(--muted2);font-weight:400">(optional)</span></label>
+      <input id="report-author" type="text" placeholder="e.g. Hydrology Department"/>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeReportModal()" style="background:var(--panel2); flex:1;">Cancel</button>
+      <button class="btn btn-report" onclick="submitReport()" style="flex:1;">Generate Report</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
 <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
@@ -704,6 +738,7 @@ function placeOutletAndDelineate(lat, lon, acc) {
       outlets.push(outlet);
       renderOutletList();
       document.getElementById('export-section').style.display = 'block';
+      document.getElementById('report-btn').disabled = false;
       const s = result.stats;
       setStatus(
         `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped?' (snapped)':''}`,
@@ -787,6 +822,49 @@ function submitPrint() {
   .catch(err => { hideLoader(); setStatus('Print error: ' + err, 'error'); });
 }
 
+// ── Report modal ──────────────────────────────────────────────────────────────
+function openReportModal() {
+  document.getElementById('report-modal').classList.add('on');
+}
+function closeReportModal() {
+  document.getElementById('report-modal').classList.remove('on');
+}
+function submitReport() {
+  const title  = document.getElementById('report-title').value  || 'Catchment Analysis Report';
+  const author = document.getElementById('report-author').value || '';
+  closeReportModal();
+  setLoader('Generating report\u2026', 'Building charts and composing pages\u2026');
+
+  const outletData = outlets.map(o => ({
+    id: o.id, name: o.name || '', color: o.color
+  }));
+
+  fetch('/api/report', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      title, author,
+      outlets: outletData,
+      acc_threshold: parseInt(document.getElementById('acc-slider').value) || 500
+    })
+  })
+  .then(r => {
+    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Report failed'); });
+    return r.blob();
+  })
+  .then(blob => {
+    hideLoader();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = title.replace(/[^a-zA-Z0-9 _-]/g, '').trim() + '_report.html';
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus('Report downloaded — open the .html file in your browser, then Print \u2192 Save as PDF.', 'ok');
+  })
+  .catch(e => { hideLoader(); showDemReportError('Report error: ' + e.message); });
+}
+
 function removeOutlet(id) {
   const idx = outlets.findIndex(o => o.id === id);
   if (idx < 0) return;
@@ -800,7 +878,10 @@ function removeOutlet(id) {
   if (o.catchLayer) map.removeLayer(o.catchLayer);
   outlets.splice(idx, 1);
   renderOutletList();
-  if (!outlets.length) document.getElementById('export-section').style.display = 'none';
+  if (!outlets.length) {
+    document.getElementById('export-section').style.display = 'none';
+    document.getElementById('report-btn').disabled = true;
+  }
   setStatus('Outlet #'+id+' removed.', '');
 }
 
@@ -827,6 +908,7 @@ function _clearPreviousDEM() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
+  document.getElementById('report-btn').disabled = true;
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
@@ -886,6 +968,8 @@ function _handleDemResponse(info, _unused, sourceLabel) {
   document.getElementById('params-section').style.display  = 'block';
   document.getElementById('raster-section').style.display  = 'block';
   document.getElementById('outlets-section').style.display = 'block';
+  document.getElementById('export-section').style.display  = 'block';
+  document.getElementById('report-btn').disabled = true;
 
   const nSegs = info.rivers ? info.rivers.features.length : 0;
   document.getElementById('instruction-text').textContent =
@@ -1106,6 +1190,7 @@ function resetAll() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
+  document.getElementById('report-btn').disabled = true;
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
