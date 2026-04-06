@@ -263,10 +263,12 @@
     .modal-field input:focus, .modal-field select:focus { border-color:var(--accent); }
     .modal-field select option { background:var(--panel); }
     .btn-print { background:#1a5c38; color:#fff; }
-    .btn-print:hover { background:#1f7046; }
+    .btn-print:hover:not(:disabled) { background:#1f7046; }
+    .btn-print:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
     .btn-report { background:#1a3a5c; color:#7ab4e0; border:1px solid #1e4a6e; }
     .btn-report:hover:not(:disabled) { background:#1e4a7a; }
     .btn-report:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
+    .btn-gpkg:disabled, .btn-shp:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
 
     /* Report modal */
     #report-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72);
@@ -422,16 +424,16 @@
   <!-- Export -->
   <div class="section" id="export-section" style="display:none;">
     <div class="sec-title">Export results</div>
-    <button class="btn btn-print" style="margin-bottom:7px;" onclick="openPrintModal()">
+    <button class="btn btn-print" style="margin-bottom:7px;" onclick="openPrintModal()" id="print-btn" disabled>
       &#128438;&nbsp; Print Map (PNG)
     </button>
     <button class="btn btn-report" style="margin-bottom:7px;" onclick="openReportModal()" id="report-btn" disabled>
-      &#128196;&nbsp; Export Report (PDF)
+      &#128196;&nbsp; Export Report (HTML)
     </button>
-    <button class="btn btn-gpkg" onclick="exportResult('gpkg')">
+    <button class="btn btn-gpkg" onclick="exportResult('gpkg')" id="gpkg-btn" disabled>
       &#8659;&nbsp; GeoPackage (.gpkg) — open in QGIS
     </button>
-    <button class="btn btn-shp" onclick="exportResult('shp')">
+    <button class="btn btn-shp" onclick="exportResult('shp')" id="shp-btn" disabled>
       &#8659;&nbsp; Shapefile (.zip)
     </button>
   </div>
@@ -738,7 +740,7 @@ function placeOutletAndDelineate(lat, lon, acc) {
       outlets.push(outlet);
       renderOutletList();
       document.getElementById('export-section').style.display = 'block';
-      document.getElementById('report-btn').disabled = false;
+      ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = false);
       const s = result.stats;
       setStatus(
         `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped?' (snapped)':''}`,
@@ -880,7 +882,7 @@ function removeOutlet(id) {
   renderOutletList();
   if (!outlets.length) {
     document.getElementById('export-section').style.display = 'none';
-    document.getElementById('report-btn').disabled = true;
+    ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
   }
   setStatus('Outlet #'+id+' removed.', '');
 }
@@ -908,7 +910,7 @@ function _clearPreviousDEM() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
-  document.getElementById('report-btn').disabled = true;
+  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
@@ -917,9 +919,15 @@ function _clearPreviousDEM() {
 function _handleDemResponse(info, _unused, sourceLabel) {
   stopProgressPoll();
   hideLoader();
-  if (info.error) {
-    showDemReportError(info.error);
-    setStatus('DEM error: ' + info.error, 'error');
+  // info.error may be an empty string (falsy) — use != null to catch that
+  if (info.error != null) {
+    showDemReportError(info.error || 'Server error (no details)');
+    setStatus('DEM error: ' + (info.error || 'unknown'), 'error');
+    return;
+  }
+  if (!info.bounds) {
+    showDemReportError('Server returned an incomplete response — please try again.');
+    setStatus('DEM error: missing bounds in response', 'error');
     return;
   }
   // Use server-reported source if available (catches AWS fallback)
@@ -969,7 +977,7 @@ function _handleDemResponse(info, _unused, sourceLabel) {
   document.getElementById('raster-section').style.display  = 'block';
   document.getElementById('outlets-section').style.display = 'block';
   document.getElementById('export-section').style.display  = 'block';
-  document.getElementById('report-btn').disabled = true;
+  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
 
   const nSegs = info.rivers ? info.rivers.features.length : 0;
   document.getElementById('instruction-text').textContent =
@@ -997,10 +1005,13 @@ function downloadDEM() {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ polygon: drawnPolygon }),
   })
-  .then(r => r.json())
-  .then(info => {
+  .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+  .then(({ ok, data: info }) => {
     stopProgressPoll(); hideLoader();
-    if (info.error) { showDemReportError(info.error); setStatus('DEM error: ' + info.error, 'error'); return; }
+    if (!ok || info.error != null) {
+      const msg = info.error || `Server error (HTTP ${ok ? 200 : 'unknown'})`;
+      showDemReportError(msg); setStatus('DEM error: ' + msg, 'error'); return;
+    }
     _handleDemResponse(info, [], 'OpenTopography SRTM GL1 (30 m)');
   })
   .catch(e => { stopProgressPoll(); hideLoader(); showDemReportError('Network error: ' + e); setStatus('Network error: '+e, 'error'); });
@@ -1190,7 +1201,7 @@ function resetAll() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
-  document.getElementById('report-btn').disabled = true;
+  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;

@@ -1094,10 +1094,9 @@ def api_fetch_dem():
             "fallback_reason":  _dem_progress.get("fallback_reason", ""),
         })
     except Exception as e:
-        msg = str(e)
+        msg = str(e) or repr(e) or "Unknown server error"
         _emit_error(msg)
         return jsonify({"error": msg, "trace": traceback.format_exc()}), 500
-
 
 
 
