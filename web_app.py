@@ -46,6 +46,15 @@ OPENTOPO_API_KEY = os.environ.get("OPENTOPO_API_KEY", "4e570ef4c138e88ff14c204a2
 OPENTOPO_URL     = "https://portal.opentopography.org/API/globaldem"
 TILE_DIR  = os.path.join(tempfile.gettempdir(), "catchment_dem_tiles")
 os.makedirs(TILE_DIR, exist_ok=True)
+
+# Persistent basemap tile cache — reused across server restarts
+_BASEMAP_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "basemap_tiles")
+os.makedirs(_BASEMAP_CACHE, exist_ok=True)
+try:
+    import contextily as _ctx_init
+    _ctx_init.set_cache_dir(_BASEMAP_CACHE)
+except Exception:
+    pass
 NODATA = -9999.0
 
 # ── D8 lookup ──────────────────────────────────────────────────────────────────
@@ -65,8 +74,9 @@ _RT  = "#1a1a2e"       # text dark
 _RMT = "#445566"       # text mid
 
 # ── Global state ───────────────────────────────────────────────────────────────
-_cache       = {}   # Conditioned DEM + fdir/acc arrays
-_all_results = []   # All delineation results, one per outlet placed
+_cache        = {}            # Conditioned DEM + fdir/acc arrays
+_all_results  = []            # All delineation results, one per outlet placed
+                                               # River network is cached inside _cache["rivers_cache"]
 
 # ── Naturalearth countries cache (downloaded once per process) ─────────────────
 _NE_COUNTRIES_CACHE = os.path.join(os.path.dirname(__file__), "data", "ne_110m_countries.geojson")
@@ -814,8 +824,71 @@ def delineate(lat, lon, acc_threshold):
             "outlet_lon":      round(ox, 6),
             "snapped":         (s_row != row or s_col != col),
             "dem_res_m":       round(cell_m, 1),
+            "acc_threshold":   acc_threshold,
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SHARED MAP HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_hillshade_rgba(catchment_union):
+    """Return cached (rgba_array, [west,east,south,north]) for the DEM hillshade.
+
+    Keyed by the number of delineation results so it auto-invalidates when
+    new outlets are added.  Both api_print_map and _rpt_html_map call this
+    instead of re-computing the identical LightSource.shade every time.
+    Returns (None, None) if no DEM or the computation fails.
+    """
+    if not _cache or "dem_arr" not in _cache or catchment_union is None:
+        return None, None
+
+    key = len(_all_results)
+    hs  = _cache.get("_hillshade")
+    if hs is not None and hs.get("key") == key:
+        return hs["rgba"], hs["extent"]
+
+    try:
+        dem   = _cache["dem_arr"].astype(float)
+        aff   = _cache["affine"]
+        nr, nc = dem.shape
+        west  = aff.c
+        east  = aff.c + aff.a * nc
+        north = aff.f
+        south = aff.f + aff.e * nr  # aff.e is negative
+
+        cmask = rasterio.features.rasterize(
+            [(catchment_union, 1)],
+            out_shape=(nr, nc),
+            transform=aff,
+            fill=0, dtype="uint8",
+        ).astype(bool)
+
+        dem_c = np.where(cmask & np.isfinite(dem), dem, np.nan)
+        valid = np.isfinite(dem_c)
+        if not valid.any():
+            return None, None
+
+        vmin = float(np.percentile(dem_c[valid], 2))
+        vmax = float(np.percentile(dem_c[valid], 98))
+        if vmax <= vmin:
+            vmax = vmin + 1.0
+
+        dem_hs = np.where(valid, dem_c, vmin)
+        ls     = LightSource(azdeg=315, altdeg=40)
+        rgb    = ls.shade(dem_hs, cmap=plt.cm.gist_earth,
+                          vmin=vmin, vmax=vmax,
+                          blend_mode="soft", vert_exag=1.5)
+        alpha  = np.where(cmask, 0.65, 0.0)
+        rgba   = np.dstack([rgb[..., :3], alpha])
+        extent = [west, east, south, north]
+
+        _cache["_hillshade"] = {"key": key, "rgba": rgba, "extent": extent}
+        return rgba, extent
+    except Exception:
+        import traceback; traceback.print_exc()
+        return None, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -893,7 +966,7 @@ def _pm_locator_map(ax, catches_gdf, main_xmin, main_xmax, main_ymin, main_ymax)
     try:
         ctx.add_basemap(ax_ins, crs="EPSG:4326",
                         source=ctx.providers.CartoDB.Positron,
-                        attribution=False, zoom="auto")
+                        attribution=False, zoom=6)
         ax_ins.set_xlim(ix0, ix1)   # restore after contextily
         ax_ins.set_ylim(iy0, iy1)
     except Exception:
@@ -1465,7 +1538,11 @@ def api_print_map():
         outlet_info = data.get("outlets", [])      # [{id, name, color}]
         paper       = data.get("paper", "A4")
         orient      = data.get("orientation", "landscape")
-        acc_thresh  = int(data.get("acc_threshold", 500))
+        # Slider value sent by JS is the source of truth; fall back to stored
+        # threshold from the last delineation if the request omits it
+        _req_thresh = data.get("acc_threshold")
+        acc_thresh  = int(_req_thresh) if _req_thresh is not None else (
+            _all_results[-1]["stats"].get("acc_threshold") or 500)
 
         # Paper size (landscape by default; swap axes for portrait)
         sizes = {"A4": (13.69, 8.27), "A3": (18.54, 11.69), "Letter": (13.0, 8.5)}
@@ -1536,11 +1613,16 @@ def api_print_map():
         ax.set_ylim(ymin, ymax)
 
         # ── Basemap tiles (CartoDB Positron — clean print style) ───────
+        # Cap zoom so we never fetch hundreds of tiles for large extents.
+        # Target ≤ ~8 tiles across; zoom = log2(8 * 360 / span), capped 7–11.
+        # Zoom 11 → ~9 tiles for a 0.5° catchment; zoom 13 → ~90 tiles (too slow).
+        _deg_span  = max(xmax - xmin, ymax - ymin)
+        _map_zoom  = max(7, min(11, int(math.log2(max(8 * 360 / max(_deg_span, 0.001), 1)))))
         try:
             import contextily as ctx
             ctx.add_basemap(ax, crs="EPSG:4326",
                             source=ctx.providers.CartoDB.Positron,
-                            attribution=False, zoom="auto")
+                            attribution=False, zoom=_map_zoom)
         except Exception:
             pass   # offline / tile error — plain background remains
         # contextily may shift limits — restore our pre-computed extent
@@ -1558,41 +1640,10 @@ def api_print_map():
         # ── DEM hillshade clipped to catchment polygon ─────────────────
         if _cache and "dem_arr" in _cache:
             try:
-                _dem     = _cache["dem_arr"].copy().astype(float)
-                _aff     = _cache["affine"]
-                _nr, _nc = _dem.shape
-                _west    = _aff.c
-                _east    = _aff.c + _aff.a * _nc
-                _north   = _aff.f
-                _south   = _aff.f + _aff.e * _nr   # aff.e is negative
-
-                # Rasterise catchment union → boolean mask (rasterize is
-                # more reliable than geometry_mask for complex polygons)
-                _cmask = rasterio.features.rasterize(
-                    [(catchment_union, 1)],
-                    out_shape=(_nr, _nc),
-                    transform=_aff,
-                    fill=0, dtype="uint8",
-                ).astype(bool)
-
-                _dem_c = np.where(_cmask & np.isfinite(_dem), _dem, np.nan)
-                _valid = np.isfinite(_dem_c)
-                if _valid.any():
-                    _vmin = float(np.percentile(_dem_c[_valid], 2))
-                    _vmax = float(np.percentile(_dem_c[_valid], 98))
-                    if _vmax <= _vmin:
-                        _vmax = _vmin + 1.0
-                    # LightSource.shade needs no NaN — fill with vmin outside
-                    _dem_hs = np.where(_valid, _dem_c, _vmin)
-                    _ls  = LightSource(azdeg=315, altdeg=40)
-                    _rgb = _ls.shade(_dem_hs, cmap=plt.cm.gist_earth,
-                                     vmin=_vmin, vmax=_vmax,
-                                     blend_mode="soft", vert_exag=1.5)
-                    # 65 % opacity — lets basemap show through, muted for print
-                    _alpha = np.where(_cmask, 0.65, 0.0)
-                    _rgba  = np.dstack([_rgb[..., :3], _alpha])
-                    ax.imshow(_rgba, extent=[_west, _east, _south, _north],
-                              origin="upper", zorder=1, interpolation="bilinear",
+                _rgba, _hs_ext = _get_hillshade_rgba(catchment_union)
+                if _rgba is not None:
+                    ax.imshow(_rgba, extent=_hs_ext,
+                              origin="upper", zorder=1, interpolation="nearest",
                               aspect="auto")
             except Exception:
                 traceback.print_exc()   # log but don't abort the map
@@ -1644,7 +1695,8 @@ def api_print_map():
         )
 
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=220, bbox_inches="tight")
+        fig.savefig(buf, format="png", dpi=110,
+                    pil_kwargs={"compress_level": 0})
         buf.seek(0)
         return send_file(buf, mimetype="image/png", as_attachment=True,
                          download_name="catchment_map.png")
@@ -1764,10 +1816,11 @@ def _rpt_compute_river_stats(rivers_gdf):
 
 
 # ── figure → base64 ─────────────────────────────────────────────────────────
-def _fig_to_b64(fig, dpi=150):
+def _fig_to_b64(fig, dpi=110):
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", dpi=dpi,
+                facecolor=fig.get_facecolor(),
+                pil_kwargs={"compress_level": 0})
     buf.seek(0)
     data = base64.b64encode(buf.read()).decode("ascii")
     plt.close(fig)
@@ -1775,7 +1828,7 @@ def _fig_to_b64(fig, dpi=150):
 
 
 # ── map image ─────────────────────────────────────────────────────────────────
-def _rpt_html_map(outlet_info, acc_thresh):
+def _rpt_html_map(outlet_info, acc_thresh, rivers_gdf_prebuilt=None):
     """Render the study-area map identical in style to the PNG export."""
     import contextily as ctx
 
@@ -1830,11 +1883,15 @@ def _rpt_html_map(outlet_info, acc_thresh):
         ymin -= delta / 2; ymax += delta / 2
 
     # ── Rivers clipped to catchment union ─────────────────────────────────
-    rivers_fc = extract_rivers_global(acc_thresh)
-    rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
-                       if rivers_fc.get("features") else gpd.GeoDataFrame())
-    rivers_gdf = (rivers_gdf_full.clip(catchment_union)
-                  if not rivers_gdf_full.empty else gpd.GeoDataFrame())
+    # rivers_gdf_prebuilt is already clipped (done in api_report before calling us)
+    if rivers_gdf_prebuilt is not None:
+        rivers_gdf = rivers_gdf_prebuilt  # already clipped — use directly
+    else:
+        rivers_fc = extract_rivers_global(acc_thresh)
+        rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                           if rivers_fc.get("features") else gpd.GeoDataFrame())
+        rivers_gdf = (rivers_gdf_full.clip(catchment_union)
+                      if not rivers_gdf_full.empty else gpd.GeoDataFrame())
 
     # ── Figure ─────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(14, 10), facecolor="white")
@@ -1844,11 +1901,13 @@ def _rpt_html_map(outlet_info, acc_thresh):
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    # Basemap
+    # Basemap — same zoom cap as print map (≤ 11, target 8 tiles across)
+    _rdeg   = max(xmax - xmin, ymax - ymin)
+    _rzoom  = max(7, min(11, int(math.log2(max(8 * 360 / max(_rdeg, 0.001), 1)))))
     try:
         ctx.add_basemap(ax, crs="EPSG:4326",
                         source=ctx.providers.CartoDB.Positron,
-                        attribution=False, zoom="auto")
+                        attribution=False, zoom=_rzoom)
     except Exception:
         pass
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
@@ -1862,34 +1921,10 @@ def _rpt_html_map(outlet_info, acc_thresh):
     # ── DEM hillshade clipped to catchment (identical to PNG export) ──────
     if dem_arr is not None and nr > 0:
         try:
-            _dem   = dem_arr.copy().astype(float)
-            _west  = affine.c
-            _east  = affine.c + affine.a * nc
-            _north = affine.f
-            _south = affine.f + affine.e * nr
-
-            _cmask = rasterio.features.rasterize(
-                [(catchment_union, 1)],
-                out_shape=(nr, nc),
-                transform=affine,
-                fill=0, dtype="uint8",
-            ).astype(bool)
-
-            _dem_c = np.where(_cmask & np.isfinite(_dem), _dem, np.nan)
-            _valid = np.isfinite(_dem_c)
-            if _valid.any():
-                _vmin = float(np.percentile(_dem_c[_valid], 2))
-                _vmax = float(np.percentile(_dem_c[_valid], 98))
-                if _vmax <= _vmin: _vmax = _vmin + 1.0
-                _dem_hs = np.where(_valid, _dem_c, _vmin)
-                _ls  = LightSource(azdeg=315, altdeg=40)
-                _rgb = _ls.shade(_dem_hs, cmap=plt.cm.gist_earth,
-                                 vmin=_vmin, vmax=_vmax,
-                                 blend_mode="soft", vert_exag=1.5)
-                _alpha = np.where(_cmask, 0.65, 0.0)
-                _rgba  = np.dstack([_rgb[..., :3], _alpha])
-                ax.imshow(_rgba, extent=[_west, _east, _south, _north],
-                          origin="upper", zorder=1, interpolation="bilinear",
+            _rgba, _hs_ext = _get_hillshade_rgba(catchment_union)
+            if _rgba is not None:
+                ax.imshow(_rgba, extent=_hs_ext,
+                          origin="upper", zorder=1, interpolation="nearest",
                           aspect="auto")
         except Exception:
             import traceback as _tb; _tb.print_exc()
@@ -1928,7 +1963,7 @@ def _rpt_html_map(outlet_info, acc_thresh):
     _pm_locator_map(ax, catches_gdf, xmin, xmax, ymin, ymax)
     _pm_legend(ax, outlet_info, rivers_gdf)
 
-    return _fig_to_b64(fig, dpi=180)
+    return _fig_to_b64(fig, dpi=110)
 
 
 
@@ -1978,7 +2013,7 @@ def _rpt_html_strahler_charts(riv_stats):
                 f"{v:.2f}", ha="center", va="bottom", fontsize=8.5, fontweight="bold", color=GRN)
 
     plt.tight_layout(pad=2.5)
-    return _fig_to_b64(fig, dpi=130)
+    return _fig_to_b64(fig, dpi=100)
 
 
 # ── Horton log-linear charts ──────────────────────────────────────────────────
@@ -2016,7 +2051,7 @@ def _rpt_html_horton_chart(riv_stats):
     ax2.set_xticks(orders)
 
     plt.tight_layout(pad=2.5)
-    return _fig_to_b64(fig, dpi=130)
+    return _fig_to_b64(fig, dpi=100)
 
 
 # ── Elevation box plot ───────────────────────────────────────────────────────
@@ -2101,7 +2136,7 @@ def _rpt_html_elev_chart(catch_stats):
     ax.set_axisbelow(True)
     ax.tick_params(colors="#445566", labelsize=9)
     plt.tight_layout()
-    return _fig_to_b64(fig, dpi=130)
+    return _fig_to_b64(fig, dpi=100)
 
 
 # ── HTML helpers
@@ -2779,7 +2814,11 @@ def api_report():
     title       = data.get("title",  "Catchment Analysis Report")
     author      = data.get("author", "")
     outlet_info = data.get("outlets", [])
-    acc_thresh  = int(data.get("acc_threshold", 500))
+    # Slider value sent by JS is the source of truth; fall back to stored
+    # threshold from the last delineation if the request omits it
+    _req_thresh = data.get("acc_threshold")
+    acc_thresh  = int(_req_thresh) if _req_thresh is not None else (
+        _all_results[-1]["stats"].get("acc_threshold") or 500)
     dem_source  = _dem_progress.get("source", "SRTM GL1 (30 m)")
     res_m       = round(abs(_cache["affine"].a) * 111320, 1) if _cache else 30
     date_str    = datetime.datetime.now().strftime("%d %B %Y")
@@ -2803,15 +2842,21 @@ def api_report():
                                      "outlet_id": oid, "name": name, "color": color}
                 all_outlet_feats.append(f2)
 
-        catches_gdf = gpd.GeoDataFrame.from_features(all_catches,      crs=4326)
-        outlets_gdf = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
-        rivers_fc   = extract_rivers_global(acc_thresh)
-        rivers_gdf  = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
-                       if rivers_fc.get("features") else gpd.GeoDataFrame())
+        catches_gdf      = gpd.GeoDataFrame.from_features(all_catches,      crs=4326)
+        outlets_gdf      = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+        catchment_union  = catches_gdf.unary_union
+
+        rivers_fc        = extract_rivers_global(acc_thresh)
+        rivers_gdf_full  = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                            if rivers_fc.get("features") else gpd.GeoDataFrame())
+        # Clip to catchment so stats + map only reflect rivers within the watershed
+        rivers_gdf       = (rivers_gdf_full.clip(catchment_union)
+                            if not rivers_gdf_full.empty else gpd.GeoDataFrame())
 
         catch_stats  = _rpt_compute_stats(catches_gdf, outlets_gdf)
         riv_stats    = _rpt_compute_river_stats(rivers_gdf)
-        map_b64      = _rpt_html_map(outlet_info, acc_thresh)
+        # Pass already-clipped rivers; _rpt_html_map will use them directly
+        map_b64      = _rpt_html_map(outlet_info, acc_thresh, rivers_gdf_prebuilt=rivers_gdf)
         strahler_b64 = _rpt_html_strahler_charts(riv_stats)
         elev_b64     = _rpt_html_elev_chart(catch_stats)
 

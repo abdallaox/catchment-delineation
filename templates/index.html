@@ -800,7 +800,7 @@ function submitPrint() {
   }));
 
   closePrintModal();
-  setLoader('Rendering print map…', 'Composing GIS layout…');
+  const stopMapLoader = startStageLoader('Rendering print map…', MAP_STAGES);
 
   fetch('/api/print_map', {
     method: 'POST',
@@ -813,7 +813,7 @@ function submitPrint() {
     return r.blob();
   })
   .then(blob => {
-    hideLoader();
+    stopMapLoader(); hideLoader();
     const url = URL.createObjectURL(blob);
     const a   = document.createElement('a');
     a.href = url; a.download = 'catchment_map.png';
@@ -821,7 +821,7 @@ function submitPrint() {
     URL.revokeObjectURL(url);
     setStatus('Map exported as PNG.', 'ok');
   })
-  .catch(err => { hideLoader(); setStatus('Print error: ' + err, 'error'); });
+  .catch(err => { stopMapLoader(); hideLoader(); setStatus('Print error: ' + err, 'error'); });
 }
 
 // ── Report modal ──────────────────────────────────────────────────────────────
@@ -835,7 +835,7 @@ function submitReport() {
   const title  = document.getElementById('report-title').value  || 'Catchment Analysis Report';
   const author = document.getElementById('report-author').value || '';
   closeReportModal();
-  setLoader('Generating report\u2026', 'Building charts and composing pages\u2026');
+  const stopRptLoader = startStageLoader('Generating report\u2026', RPT_STAGES);
 
   const outletData = outlets.map(o => ({
     id: o.id, name: o.name || '', color: o.color
@@ -855,7 +855,7 @@ function submitReport() {
     return r.blob();
   })
   .then(blob => {
-    hideLoader();
+    stopRptLoader(); hideLoader();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -864,7 +864,7 @@ function submitReport() {
     URL.revokeObjectURL(url);
     setStatus('Report downloaded — open the .html file in your browser, then Print \u2192 Save as PDF.', 'ok');
   })
-  .catch(e => { hideLoader(); showDemReportError('Report error: ' + e.message); });
+  .catch(e => { stopRptLoader(); hideLoader(); showDemReportError('Report error: ' + e.message); });
 }
 
 function removeOutlet(id) {
@@ -1294,6 +1294,42 @@ function removeUploadedLayer(name) {
     delete _uploadedLayers[name];
     _renderUploadList();
   }
+}
+
+// ── Stage-cycling loader ──────────────────────────────────────────────────────
+// Returns a stop function; call it when the request finishes.
+const MAP_STAGES = [
+  { detail: 'Building catchment extent and padding…',      pct: 8  },
+  { detail: 'Fetching CartoDB Positron basemap tiles…',    pct: 22 },
+  { detail: 'Rasterising catchment mask…',                 pct: 38 },
+  { detail: 'Computing terrain hillshade (LightSource)…',  pct: 52 },
+  { detail: 'Clipping river network to catchment boundary…', pct: 64 },
+  { detail: 'Rendering Strahler-ordered stream segments…', pct: 74 },
+  { detail: 'Drawing north arrow, scale bar, legend…',     pct: 84 },
+  { detail: 'Encoding PNG at 110 dpi…',                    pct: 94 },
+];
+const RPT_STAGES = [
+  { detail: 'Reading catchment boundaries and outlets…',   pct: 6  },
+  { detail: 'Fetching CartoDB Positron basemap tiles…',    pct: 16 },
+  { detail: 'Rasterising catchment mask…',                 pct: 26 },
+  { detail: 'Computing terrain hillshade (LightSource)…',  pct: 36 },
+  { detail: 'Clipping river network to catchment boundary…', pct: 46 },
+  { detail: 'Rendering Strahler-ordered stream segments…', pct: 54 },
+  { detail: 'Sampling DEM pixels for elevation box plot…', pct: 63 },
+  { detail: 'Computing morphometric indices (Rc, Re, Dd, Rb…)', pct: 72 },
+  { detail: 'Building Strahler bar charts…',               pct: 80 },
+  { detail: 'Composing 5-page HTML report…',               pct: 90 },
+  { detail: 'Finalising and encoding output…',             pct: 96 },
+];
+function startStageLoader(title, stages) {
+  let idx = 0;
+  setLoader(title, stages[0].detail, stages[0].pct);
+  const iv = setInterval(() => {
+    idx = Math.min(idx + 1, stages.length - 1);
+    document.getElementById('loader-detail').textContent = stages[idx].detail;
+    _setLoaderPct(stages[idx].pct);
+  }, 3200);
+  return () => clearInterval(iv);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
