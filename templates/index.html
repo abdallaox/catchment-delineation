@@ -131,14 +131,64 @@
     .outlet-info { flex:1; }
     .outlet-info .coords { font-size:10px; color:var(--muted); font-family:monospace; }
     .outlet-info .stats  { font-size:11px; color:var(--accent); margin-top:1px; }
+    .zoom-to-btn { background:none; border:none; color:var(--muted); cursor:pointer;
+                   font-size:14px; line-height:1; padding:0 3px; flex-shrink:0; }
+    .zoom-to-btn:hover { color:var(--accent); }
     .outlet-remove { background:none; border:none; color:var(--error); cursor:pointer;
                      font-size:16px; line-height:1; padding:0 2px; opacity:.7; }
     .outlet-remove:hover { opacity:1; }
     #outlet-list-empty { font-size:11px; color:var(--muted); padding:6px 0; }
 
-    /* Map */
+    /* Map area — VS Code-style tab container */
+    #map-area { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+    #map-tabbar { display:flex; align-items:stretch; background:#0b151f;
+                  border-bottom:1px solid var(--border); flex-shrink:0; min-height:33px; }
+    .map-tab { display:flex; align-items:center; gap:6px; padding:0 14px;
+               font-size:12px; color:var(--muted); cursor:pointer; border-right:1px solid var(--border);
+               border-top:2px solid transparent; user-select:none; white-space:nowrap; }
+    .map-tab:hover { color:var(--text); background:rgba(255,255,255,.04); }
+    .map-tab.active { color:var(--text); background:var(--bg); border-top-color:var(--accent); }
+    .map-tab-close { background:none; border:none; color:var(--muted); cursor:pointer;
+                     font-size:14px; line-height:1; padding:0 2px; margin-left:2px;
+                     border-radius:3px; display:flex; align-items:center; }
+    .map-tab-close:hover { color:var(--text); background:rgba(255,255,255,.12); }
+    #map-content { flex:1; position:relative; overflow:hidden; display:flex; }
     #map { flex:1; cursor:crosshair; }
     #map.wait { cursor:wait; }
+    /* Print preview panel */
+    #preview-panel { display:none; flex:1; flex-direction:column; background:#111820; overflow:hidden; }
+    #preview-panel.active { display:flex; }
+    #preview-toolbar { display:flex; align-items:center; gap:10px; padding:8px 14px;
+                       background:#0b151f; border-bottom:1px solid var(--border); flex-shrink:0; }
+    #preview-toolbar span { font-size:12px; color:var(--muted); }
+    #preview-dl-btn { background:#1a5c38; color:#fff; border:none; padding:6px 16px;
+                      border-radius:5px; cursor:pointer; font-size:12px; font-weight:600;
+                      display:flex; align-items:center; gap:5px; margin-left:auto; }
+    #preview-dl-btn:hover { background:#1f7046; }
+    #preview-scroll { flex:1; overflow:hidden; position:relative; cursor:grab; }
+    #preview-scroll.panning { cursor:grabbing; }
+    #preview-img-wrap { position:absolute; transform-origin:0 0; line-height:0;
+                        border-radius:4px; box-shadow:0 4px 24px rgba(0,0,0,.6); }
+    #preview-img { display:block; border-radius:4px; }
+    /* PREVIEW watermark — on top of figures, purely visual */
+    #preview-watermark { position:absolute; inset:0; pointer-events:none; overflow:hidden;
+                         border-radius:4px; z-index:10;
+                         display:flex; align-items:center; justify-content:center; }
+    #preview-watermark::before {
+      content:'PREVIEW';
+      font-size:clamp(48px, 10vw, 110px); font-weight:900; letter-spacing:.25em;
+      color:rgba(20,80,200,.42); transform:rotate(-35deg);
+      white-space:nowrap; user-select:none; pointer-events:none;
+      text-shadow:0 2px 12px rgba(10,40,120,.35);
+    }
+    /* Drag-over highlight */
+    #map-area.drag-over::after { content:'Drop file to upload';
+      position:absolute; inset:0; background:rgba(30,100,160,.35);
+      border:3px dashed var(--accent); z-index:9000;
+      display:flex; align-items:center; justify-content:center;
+      font-size:22px; font-weight:700; color:#fff;
+      pointer-events:none; border-radius:0; }
+    #map-area { position:relative; }
 
     /* Loading overlay */
     #loader { display:none; position:fixed; inset:0; background:rgba(4,10,18,.8);
@@ -324,10 +374,11 @@
       <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
         &#8659;&nbsp; Download DEM
       </button>
-      <button id="upload-dem-btn" class="btn btn-upload-dem"
+      <!-- Upload DEM disabled — not yet ready -->
+      <!-- <button id="upload-dem-btn" class="btn btn-upload-dem"
               onclick="document.getElementById('dem-file-input').click()">
         &#8679;&nbsp; Upload DEM
-      </button>
+      </button> -->
     </div>
     <div class="dem-source-label" id="dem-source-label"></div>
     <div id="dem-info" style="display:none; margin-top:10px;">
@@ -359,7 +410,10 @@
 
   <!-- Raster layers (acc + fdir) — shown after DEM loaded -->
   <div class="section" id="raster-section" style="display:none;">
-    <div class="sec-title">Raster layers</div>
+    <div class="sec-title" style="display:flex;align-items:center;">
+      <span style="flex:1;">Raster layers</span>
+      <button class="zoom-to-btn" onclick="zoomToRasterLayer()" title="Zoom to DEM extent">&#x25CE;</button>
+    </div>
     <label class="toggle-row">
       <input type="checkbox" id="tog-dem" checked onchange="toggleRasterLayer('dem')"/>
       <span class="color-swatch" style="background:linear-gradient(90deg,#6a8f5a,#c4a96b,#e8e0c0);"></span>
@@ -379,7 +433,10 @@
 
   <!-- River layers -->
   <div class="section" id="river-section" style="display:none;">
-    <div class="sec-title" style="margin-bottom:6px;">River layers</div>
+    <div class="sec-title" style="margin-bottom:6px;display:flex;align-items:center;">
+      <span style="flex:1;">River layers</span>
+      <button class="zoom-to-btn" onclick="zoomToRasterLayer()" title="Zoom to river extent">&#x25CE;</button>
+    </div>
     <!-- Master toggle -->
     <label class="toggle-row" style="padding-bottom:7px; border-bottom:1px solid var(--border); margin-bottom:4px;">
       <input type="checkbox" id="tog-river-all" checked onchange="toggleAllOrders(this.checked)"/>
@@ -423,19 +480,21 @@
 
   <!-- Export -->
   <div class="section" id="export-section" style="display:none;">
-    <div class="sec-title">Export results</div>
-    <button class="btn btn-print" style="margin-bottom:7px;" onclick="openPrintModal()" id="print-btn" disabled>
-      &#128438;&nbsp; Print Map (PNG)
+    <div class="sec-title">Export</div>
+    <div style="font-size:11px; color:var(--muted); margin-bottom:10px; line-height:1.5;">
+      Preview the map, then download a ZIP containing the map image and all GeoJSON layers.
+    </div>
+    <button class="btn btn-print" onclick="openPrintModal()" id="print-btn" disabled
+            style="padding:12px 10px; font-size:13px;">
+      &#128438;&nbsp; Show Print Preview
     </button>
-    <button class="btn btn-report" style="margin-bottom:7px;" onclick="openReportModal()" id="report-btn" disabled>
-      &#128196;&nbsp; Export Report (HTML)
-    </button>
-    <button class="btn btn-gpkg" onclick="exportResult('gpkg')" id="gpkg-btn" disabled>
-      &#8659;&nbsp; GeoPackage (.gpkg) — open in QGIS
-    </button>
-    <button class="btn btn-shp" onclick="exportResult('shp')" id="shp-btn" disabled>
-      &#8659;&nbsp; Shapefile (.zip)
-    </button>
+    <div style="margin-top:8px; font-size:10px; color:var(--muted2); text-align:center;">
+      Set title &amp; paper size → preview → export ZIP
+    </div>
+    <!-- Disabled exports (not yet ready) -->
+    <!-- <button class="btn btn-report" onclick="openReportModal()" id="report-btn" disabled>Export Report (HTML)</button> -->
+    <!-- <button class="btn btn-gpkg" onclick="exportResult('gpkg')" id="gpkg-btn" disabled>GeoPackage (.gpkg)</button> -->
+    <!-- <button class="btn btn-shp" onclick="exportResult('shp')" id="shp-btn" disabled>Shapefile (.zip)</button> -->
   </div>
 
   </div><!-- end #tab-analysis -->
@@ -526,14 +585,50 @@
 
 </div>
 
-<!-- ── Map ──────────────────────────────────────────────────────────────────── -->
-<div id="map"></div>
-<div id="coords-display">— °   — °</div>
+<!-- ── Map area ───────────────────────────────────────────────────────────── -->
+<div id="map-area">
+  <!-- VS Code-style tab bar -->
+  <div id="map-tabbar">
+    <div class="map-tab active" id="map-tab-map" onclick="switchMapTab('map')">
+      <span>&#128506;&nbsp; Map</span>
+    </div>
+    <div class="map-tab" id="map-tab-preview" style="display:none" onclick="switchMapTab('preview')">
+      <span>&#128438;&nbsp; Print Preview</span>
+      <button class="map-tab-close" onclick="closePreviewTab(event)" title="Close preview">&#x2715;</button>
+    </div>
+  </div>
 
-<!-- Map legend -->
-<div id="map-legend">
-  <h4>River order</h4>
-  <div id="legend-orders"></div>
+  <div id="map-content">
+    <div id="map"></div>
+    <div id="coords-display">— °   — °</div>
+
+    <!-- Map legend -->
+    <div id="map-legend">
+      <h4>River order</h4>
+      <div id="legend-orders"></div>
+    </div>
+
+    <!-- Print preview panel -->
+    <div id="preview-panel">
+      <div id="preview-toolbar">
+        <div style="display:flex;flex-direction:column;gap:1px;">
+          <span id="preview-title-label" style="color:var(--text);font-size:12px;font-weight:600;"></span>
+          <span id="preview-hint" style="display:none;font-size:11px;"></span>
+        </div>
+        <button id="preview-dl-btn" onclick="exportResultsZip()"
+                style="background:#1a5c38;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;white-space:nowrap;">
+          &#8659;&nbsp; Export ZIP
+          <span style="font-size:10px;opacity:.75;font-weight:400;">(PNG + GeoJSON)</span>
+        </button>
+      </div>
+      <div id="preview-scroll">
+        <div id="preview-img-wrap">
+          <img id="preview-img" src="" alt="Print Preview"/>
+          <div id="preview-watermark"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Loading overlay -->
@@ -568,29 +663,34 @@
 <!-- Print modal -->
 <div id="print-modal">
   <div id="print-modal-inner">
-    <h3>&#128438;&nbsp; Print Map</h3>
+    <h3 style="margin-bottom:4px;">&#128438;&nbsp; Print Preview Settings</h3>
+    <p style="font-size:11px; color:#8899aa; margin-bottom:14px; line-height:1.5;">
+      Configure the map layout. The preview will open in a tab — from there you can export a ZIP with the map PNG and all GeoJSON layers.
+    </p>
     <div class="modal-field">
       <label>Map Title</label>
       <input id="print-title" type="text" placeholder="Catchment Map" value="Catchment Map"/>
     </div>
-    <div class="modal-field">
-      <label>Paper Size</label>
-      <select id="print-paper">
-        <option value="A4">A4</option>
-        <option value="A3">A3</option>
-        <option value="Letter">Letter</option>
-      </select>
+    <div style="display:flex; gap:10px;">
+      <div class="modal-field" style="flex:1;">
+        <label>Paper Size</label>
+        <select id="print-paper">
+          <option value="A4">A4</option>
+          <option value="A3">A3</option>
+          <option value="Letter">Letter</option>
+        </select>
+      </div>
+      <div class="modal-field" style="flex:1;">
+        <label>Orientation</label>
+        <select id="print-orientation">
+          <option value="landscape">Landscape</option>
+          <option value="portrait">Portrait</option>
+        </select>
+      </div>
     </div>
-    <div class="modal-field">
-      <label>Orientation</label>
-      <select id="print-orientation">
-        <option value="landscape">Landscape</option>
-        <option value="portrait">Portrait</option>
-      </select>
-    </div>
-    <div style="display:flex; gap:8px; margin-top:6px;">
+    <div style="display:flex; gap:8px; margin-top:10px;">
       <button class="btn btn-danger btn-sm" style="flex:1;" onclick="closePrintModal()">Cancel</button>
-      <button class="btn btn-print btn-sm" style="flex:1;" onclick="submitPrint()">&#128438; Generate PNG</button>
+      <button class="btn btn-print btn-sm" style="flex:1; padding:8px;" onclick="submitPrint()">&#128438;&nbsp; Preview Map</button>
     </div>
   </div>
 </div>
@@ -649,6 +749,35 @@ map.setView([20, 0], 3);
 map.createPane('demPane');  map.getPane('demPane').style.zIndex  = 250;
 map.createPane('accPane');  map.getPane('accPane').style.zIndex  = 260;
 map.createPane('fdirPane'); map.getPane('fdirPane').style.zIndex = 270;
+
+// ── Drag-and-drop file upload onto the map ────────────────────────────────────
+(function () {
+  const mapEl = document.getElementById('map-area');
+  let _dragCount = 0;
+
+  mapEl.addEventListener('dragenter', e => {
+    e.preventDefault();
+    _dragCount++;
+    if (_dragCount === 1) mapEl.classList.add('drag-over');
+  });
+  mapEl.addEventListener('dragleave', e => {
+    _dragCount--;
+    if (_dragCount === 0) mapEl.classList.remove('drag-over');
+  });
+  mapEl.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  mapEl.addEventListener('drop', e => {
+    e.preventDefault();
+    _dragCount = 0;
+    mapEl.classList.remove('drag-over');
+    const files = Array.from(e.dataTransfer.files).filter(f =>
+      /\.(zip|shp|geojson|json)$/i.test(f.name));
+    if (!files.length) {
+      _uploadMsg('Unsupported file type — drop a .zip, .shp, .geojson, or .json', 'var(--error)');
+      return;
+    }
+    files.forEach(uploadShapeFile);
+  });
+})();
 
 // ── Draw control ──────────────────────────────────────────────────────────────
 const drawnItems = new L.FeatureGroup().addTo(map);
@@ -740,7 +869,7 @@ function placeOutletAndDelineate(lat, lon, acc) {
       outlets.push(outlet);
       renderOutletList();
       document.getElementById('export-section').style.display = 'block';
-      ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = false);
+      document.getElementById('print-btn').disabled = false;
       const s = result.stats;
       setStatus(
         `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped?' (snapped)':''}`,
@@ -760,6 +889,9 @@ function renderOutletList() {
   }
   div.innerHTML = outlets.map(o => `
     <div class="outlet-item">
+      <input type="checkbox" ${o.visible !== false ? 'checked' : ''}
+             onchange="toggleOutletLayer(${o.id}, this.checked)"
+             title="Show/hide catchment" style="margin:0 2px 0 0; cursor:pointer; accent-color:${o.color};"/>
       <div class="outlet-dot" style="background:${o.color};"></div>
       <div class="outlet-info">
         <input class="outlet-name-input" type="text"
@@ -770,6 +902,7 @@ function renderOutletList() {
         <div class="coords">#${o.id} &nbsp; ${o.lat.toFixed(4)}, ${o.lon.toFixed(4)}</div>
         <div class="stats">${o.stats.area_km2} km² · order ${o.stats.max_strahler}</div>
       </div>
+      <button class="zoom-to-btn" onclick="zoomToOutlet(${o.id})" title="Zoom to catchment">&#x25CE;</button>
       <button class="outlet-remove" onclick="removeOutlet(${o.id})" title="Remove outlet #${o.id}">&times;</button>
     </div>
   `).join('');
@@ -780,6 +913,21 @@ function updateOutletName(id, val) {
   if (o) o.name = val;
 }
 
+function toggleOutletLayer(id, show) {
+  const o = outlets.find(o => o.id === id);
+  if (!o) return;
+  o.visible = show;
+  if (o.catchLayer) { show ? map.addLayer(o.catchLayer) : map.removeLayer(o.catchLayer); }
+  if (o.marker)     { show ? map.addLayer(o.marker)     : map.removeLayer(o.marker); }
+}
+
+function zoomToOutlet(id) {
+  const o = outlets.find(o => o.id === id);
+  if (!o) return;
+  if (o.catchLayer) { try { map.fitBounds(o.catchLayer.getBounds(), { padding:[30,30] }); return; } catch(e) {} }
+  if (o.marker)     { map.setView(o.marker.getLatLng(), Math.max(map.getZoom(), 12)); }
+}
+
 // ── Print map ─────────────────────────────────────────────────────────────────
 function openPrintModal() {
   document.getElementById('print-modal').classList.add('on');
@@ -787,6 +935,8 @@ function openPrintModal() {
 function closePrintModal() {
   document.getElementById('print-modal').classList.remove('on');
 }
+let _lastExportParams = null;  // cached for ZIP export
+
 function submitPrint() {
   const title  = document.getElementById('print-title').value || 'Catchment Map';
   const paper  = document.getElementById('print-paper').value;
@@ -799,8 +949,10 @@ function submitPrint() {
     color: o.color,
   }));
 
+  _lastExportParams = { title, paper, orientation: orient, acc_threshold: acc, outlets: outletData };
+
   closePrintModal();
-  const stopMapLoader = startStageLoader('Rendering print map…', MAP_STAGES);
+  const stopMapLoader = startStageLoader('Rendering map preview…', MAP_STAGES);
 
   fetch('/api/print_map', {
     method: 'POST',
@@ -814,12 +966,23 @@ function submitPrint() {
   })
   .then(blob => {
     stopMapLoader(); hideLoader();
-    const url = URL.createObjectURL(blob);
-    const a   = document.createElement('a');
-    a.href = url; a.download = 'catchment_map.png';
-    a.click();
-    URL.revokeObjectURL(url);
-    setStatus('Map exported as PNG.', 'ok');
+    // Revoke any previous preview blob URL
+    const prevImg = document.getElementById('preview-img');
+    if (prevImg._blobUrl) URL.revokeObjectURL(prevImg._blobUrl);
+    const imgUrl = URL.createObjectURL(blob);
+    prevImg._blobUrl   = imgUrl;
+    prevImg._fileName  = 'catchment_map.png';
+    prevImg.src        = imgUrl;
+    // Reset zoom (image load event handles this)
+    const wrap = document.getElementById('preview-img-wrap');
+    if (wrap) { wrap.style.transform = ''; }
+    // Update title label in preview toolbar
+    const titleEl = document.getElementById('preview-title-label');
+    if (titleEl) titleEl.textContent = _lastExportParams.title || 'Catchment Map';
+    // Show preview tab and switch to it
+    document.getElementById('map-tab-preview').style.display = 'flex';
+    switchMapTab('preview');
+    setStatus('Preview ready — click "Export ZIP" to download map + GeoJSON.', 'ok');
   })
   .catch(err => { stopMapLoader(); hideLoader(); setStatus('Print error: ' + err, 'error'); });
 }
@@ -882,7 +1045,7 @@ function removeOutlet(id) {
   renderOutletList();
   if (!outlets.length) {
     document.getElementById('export-section').style.display = 'none';
-    ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
+    document.getElementById('print-btn').disabled = true;
   }
   setStatus('Outlet #'+id+' removed.', '');
 }
@@ -910,7 +1073,7 @@ function _clearPreviousDEM() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
-  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
+  document.getElementById('print-btn').disabled = true;
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
@@ -977,7 +1140,7 @@ function _handleDemResponse(info, _unused, sourceLabel) {
   document.getElementById('raster-section').style.display  = 'block';
   document.getElementById('outlets-section').style.display = 'block';
   document.getElementById('export-section').style.display  = 'block';
-  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
+  document.getElementById('print-btn').disabled = true;
 
   const nSegs = info.rivers ? info.rivers.features.length : 0;
   document.getElementById('instruction-text').textContent =
@@ -1005,16 +1168,34 @@ function downloadDEM() {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ polygon: drawnPolygon }),
   })
-  .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
-  .then(({ ok, data: info }) => {
+  .then(r => r.json().then(d => ({ status: r.status, ok: r.ok, data: d })))
+  .then(({ status, ok, data: info }) => {
     stopProgressPoll(); hideLoader();
     if (!ok || info.error != null) {
-      const msg = info.error || `Server error (HTTP ${ok ? 200 : 'unknown'})`;
-      showDemReportError(msg); setStatus('DEM error: ' + msg, 'error'); return;
+      let msg = info.error || `Server error (HTTP ${status})`;
+      // Make common errors more user-friendly
+      if (/connection|timeout|timed out/i.test(msg))
+        msg = 'Connection timed out. Check your internet connection and try again.';
+      else if (/api.key|apikey|401|403/i.test(msg))
+        msg = 'OpenTopography API key error. The tool will retry using AWS fallback tiles.';
+      else if (/no valid elevation/i.test(msg))
+        msg = 'No valid elevation data found in the selected area. Try a different location or draw a larger polygon.';
+      else if (/500/i.test(msg) && msg.length < 30)
+        msg = 'Server processing error. Try redrawing a smaller polygon or a different area.';
+      showDemReportError(msg);
+      setStatus('DEM error — see the report card for details', 'error');
+      return;
     }
     _handleDemResponse(info, [], 'OpenTopography SRTM GL1 (30 m)');
   })
-  .catch(e => { stopProgressPoll(); hideLoader(); showDemReportError('Network error: ' + e); setStatus('Network error: '+e, 'error'); });
+  .catch(e => {
+    stopProgressPoll(); hideLoader();
+    const msg = e.message && e.message !== 'Failed to fetch'
+      ? 'Network error: ' + e.message
+      : 'Could not reach the server. Check your internet connection and try again.';
+    showDemReportError(msg);
+    setStatus('Network error — see the report card for details', 'error');
+  });
 }
 
 // ── Upload DEM ────────────────────────────────────────────────────────────────
@@ -1149,6 +1330,12 @@ function toggleAllOrders(show) {
   if (master) { master.checked = show; master.indeterminate = false; }
 }
 
+function zoomToRiverOrder(ord) {
+  const layer = orderLayers[ord];
+  if (!layer) return;
+  try { map.fitBounds(layer.getBounds(), { padding:[30,30] }); } catch(e) {}
+}
+
 // ── Raster layer toggles ──────────────────────────────────────────────────────
 function toggleRasterLayer(name) {
   const checked = document.getElementById('tog-' + name).checked;
@@ -1156,6 +1343,10 @@ function toggleRasterLayer(name) {
   if (!layer) return;
   if (checked) map.addLayer(layer);
   else         map.removeLayer(layer);
+}
+
+function zoomToRasterLayer() {
+  if (demBounds) map.fitBounds(demBounds, { padding:[20,20] });
 }
 
 // ── Slider ────────────────────────────────────────────────────────────────────
@@ -1201,7 +1392,7 @@ function resetAll() {
   document.getElementById('raster-section').style.display  = 'none';
   document.getElementById('outlets-section').style.display = 'none';
   document.getElementById('export-section').style.display  = 'none';
-  ['print-btn','report-btn','gpkg-btn','shp-btn'].forEach(id => document.getElementById(id).disabled = true);
+  document.getElementById('print-btn').disabled = true;
   document.getElementById('tog-dem').checked  = true;
   document.getElementById('tog-acc').checked  = false;
   document.getElementById('tog-fdir').checked = false;
@@ -1217,6 +1408,170 @@ function switchTab(name) {
   document.getElementById('btn-tab-analysis').classList.toggle('active', name === 'analysis');
   document.getElementById('btn-tab-method').classList.toggle('active',   name === 'method');
 }
+
+// ── Map-area tab switching (Map | Print Preview) ──────────────────────────────
+function switchMapTab(name) {
+  const isMap     = name === 'map';
+  const mapEl     = document.getElementById('map');
+  const previewEl = document.getElementById('preview-panel');
+  const coordsEl  = document.getElementById('coords-display');
+  const legendEl  = document.getElementById('map-legend');
+
+  mapEl.style.display     = isMap ? '' : 'none';
+  coordsEl.style.display  = isMap ? '' : 'none';
+  legendEl.style.display  = isMap ? '' : 'none';
+  previewEl.classList.toggle('active', !isMap);
+
+  document.getElementById('map-tab-map').classList.toggle('active', isMap);
+  document.getElementById('map-tab-preview').classList.toggle('active', !isMap);
+
+  if (isMap) map.invalidateSize();  // fix Leaflet after being hidden
+}
+
+function closePreviewTab(e) {
+  e.stopPropagation();
+  const img = document.getElementById('preview-img');
+  if (img._blobUrl) { URL.revokeObjectURL(img._blobUrl); img._blobUrl = null; img.src = ''; }
+  document.getElementById('map-tab-preview').style.display = 'none';
+  switchMapTab('map');
+}
+
+function exportResultsZip() {
+  if (!_lastExportParams) { setStatus('Generate the preview first.', 'error'); return; }
+  const btn = document.getElementById('preview-dl-btn');
+  const orig = btn.textContent;
+  btn.textContent = 'Generating…'; btn.disabled = true;
+  fetch('/api/export_results', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(_lastExportParams),
+  })
+  .then(r => {
+    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Export failed'); });
+    return r.blob();
+  })
+  .then(blob => {
+    const title = (_lastExportParams.title || 'catchment_results').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (title || 'catchment_results') + '.zip';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setStatus('ZIP exported — contains map PNG + GeoJSON layers.', 'ok');
+  })
+  .catch(e => setStatus('Export error: ' + e.message, 'error'))
+  .finally(() => { btn.textContent = orig; btn.disabled = false; });
+}
+
+// ── Preview pan + zoom viewer ─────────────────────────────────────────────────
+(function () {
+  // _ox, _oy = position of wrap top-left corner in container space (px)
+  // _s       = current scale
+  let _s = 1, _ox = 0, _oy = 0, _minS = 0.1;
+  let _panning = false, _px = 0, _py = 0; // middle-mouse pan
+
+  const container = () => document.getElementById('preview-scroll');
+  const wrap      = () => document.getElementById('preview-img-wrap');
+  const img       = () => document.getElementById('preview-img');
+
+  function _apply() {
+    const w = wrap();
+    if (!w) return;
+    w.style.transform       = `scale(${_s})`;
+    w.style.transformOrigin = '0 0';
+    w.style.left            = _ox + 'px';
+    w.style.top             = _oy + 'px';
+  }
+
+  function _minScale() {
+    const c = container(), im = img();
+    if (!c || !im || !im.naturalWidth) return 0.1;
+    const pad = 40;
+    return Math.min(1,
+      (c.clientWidth  - pad) / im.naturalWidth,
+      (c.clientHeight - pad) / im.naturalHeight);
+  }
+
+  function _clamp() {
+    const c = container(), im = img();
+    if (!c || !im) return;
+    const iw = im.naturalWidth * _s, ih = im.naturalHeight * _s;
+    const cw = c.clientWidth,        ch = c.clientHeight;
+    // When paper fits inside container → keep it centred
+    // When paper larger than container → clamp so edges don't go past boundary
+    _ox = iw <= cw ? (cw - iw) / 2 : Math.max(cw - iw, Math.min(0, _ox));
+    _oy = ih <= ch ? (ch - ih) / 2 : Math.max(ch - ih, Math.min(0, _oy));
+  }
+
+  function _reset() {
+    _minS = _minScale();
+    _s    = _minS;
+    const c = container(), im = img();
+    if (c && im) {
+      _ox = (c.clientWidth  - im.naturalWidth  * _s) / 2;
+      _oy = (c.clientHeight - im.naturalHeight * _s) / 2;
+    }
+    _apply();
+  }
+
+  // Scroll wheel → zoom centred exactly on cursor
+  document.addEventListener('wheel', e => {
+    const c = container();
+    if (!c || !c.contains(e.target)) return;
+    e.preventDefault();
+    _minS = _minScale();
+    const rect  = c.getBoundingClientRect();
+    const cx    = e.clientX - rect.left;   // cursor in container space
+    const cy    = e.clientY - rect.top;
+    const factor = e.deltaY < 0 ? 1.12 : 0.893;
+    const newS  = Math.min(8, Math.max(_minS, _s * factor));
+    const ratio = newS / _s;
+    // Keep the image point under cursor fixed: ox_new = cx - (cx - ox)*ratio
+    _ox = cx - (cx - _ox) * ratio;
+    _oy = cy - (cy - _oy) * ratio;
+    _s  = newS;
+    _clamp();
+    _apply();
+  }, { passive: false });
+
+  // Middle-mouse button → pan
+  document.addEventListener('mousedown', e => {
+    const c = container();
+    if (!c || !c.contains(e.target) || e.button !== 1) return;
+    e.preventDefault(); // prevent autoscroll browser behaviour
+    _panning = true;
+    _px = e.clientX - _ox;
+    _py = e.clientY - _oy;
+    c.classList.add('panning');
+  });
+  document.addEventListener('mousemove', e => {
+    if (!_panning) return;
+    _ox = e.clientX - _px;
+    _oy = e.clientY - _py;
+    _clamp();
+    _apply();
+  });
+  document.addEventListener('mouseup', e => {
+    if (e.button === 1 && _panning) {
+      _panning = false;
+      const c = container();
+      if (c) c.classList.remove('panning');
+    }
+  });
+  // Suppress middle-click page scroll
+  document.addEventListener('auxclick', e => {
+    if (e.button === 1 && container()?.contains(e.target)) e.preventDefault();
+  });
+
+  // Reset when a new image loads (covers all paper/orientation changes)
+  const im = document.getElementById('preview-img');
+  if (im) im.addEventListener('load', _reset);
+
+  // Reset on panel resize (handles window resize or sidebar drag)
+  new ResizeObserver(() => {
+    if (document.getElementById('preview-panel')?.classList.contains('active')) _reset();
+  }).observe(document.getElementById('preview-scroll') || document.body);
+})();
 
 // ── Export ────────────────────────────────────────────────────────────────────
 function exportResult(fmt) { window.location.href = '/api/export/' + fmt; }
@@ -1236,6 +1591,10 @@ function handleShapefileUpload(input) {
   const file = input.files[0];
   if (!file) return;
   input.value = '';  // allow re-upload of same file
+  uploadShapeFile(file);
+}
+
+function uploadShapeFile(file) {
   const fd = new FormData();
   fd.append('file', file);
   _uploadMsg('Uploading ' + file.name + '…', 'var(--muted)');
@@ -1274,6 +1633,7 @@ function _renderUploadList() {
       <input type="checkbox" ${vis ? 'checked' : ''} onchange="toggleUploadedLayer('${esc}', this.checked)" style="margin:0;cursor:pointer;"/>
       <span class="upload-layer-dot" style="background:${c}; opacity:${vis ? 1 : 0.35};"></span>
       <span class="upload-layer-name" title="${n}" style="opacity:${vis ? 1 : 0.45};">${n}</span>
+      <button class="zoom-to-btn" onclick="zoomToUploadedLayer('${esc}')" title="Zoom to layer">&#x25CE;</button>
       <button class="upload-layer-rm" onclick="removeUploadedLayer('${esc}')" title="Remove">&#x2715;</button>
     </div>`;
   }).join('');
@@ -1294,6 +1654,12 @@ function removeUploadedLayer(name) {
     delete _uploadedLayers[name];
     _renderUploadList();
   }
+}
+
+function zoomToUploadedLayer(name) {
+  const entry = _uploadedLayers[name];
+  if (!entry) return;
+  try { map.fitBounds(entry.layer.getBounds(), { padding:[30,30] }); } catch(e) {}
 }
 
 // ── Stage-cycling loader ──────────────────────────────────────────────────────
@@ -1402,9 +1768,13 @@ function showDemReport(rows, isError) {
 function showDemReportError(msg) {
   const inner = document.getElementById('dem-report-inner');
   inner.className = 'is-error';
-  document.getElementById('dem-report-icon').textContent  = '✕';
-  document.getElementById('dem-report-title').textContent = 'Error';
-  document.getElementById('dem-report-rows').innerHTML    = '';
+  document.getElementById('dem-report-icon').textContent  = '⚠';
+  document.getElementById('dem-report-title').textContent = 'DEM Download Failed';
+  document.getElementById('dem-report-rows').innerHTML =
+    '<div class="dem-report-row" style="border:none;padding-bottom:0;">' +
+    '<span class="dem-report-lbl" style="color:#b06020">What to try</span>' +
+    '<span class="dem-report-val" style="color:#555;font-weight:400;font-size:11px">Redraw a smaller area,<br>check internet, or retry</span>' +
+    '</div>';
   const errEl = document.getElementById('dem-report-error-msg');
   errEl.textContent    = msg;
   errEl.style.display  = 'block';

@@ -12,7 +12,7 @@ Environment variables:
     OPENTOPO_API_KEY  — OpenTopography API key (fallback to hard-coded key)
 """
 
-import os, sys, io, json, math, zipfile, tempfile, warnings, traceback, shutil, datetime, base64, html as _html_mod
+import os, sys, io, json, math, re, zipfile, tempfile, warnings, traceback, shutil, datetime, base64, html as _html_mod
 import numpy as np
 import rasterio
 import rasterio.features
@@ -1700,6 +1700,160 @@ def api_print_map():
         buf.seek(0)
         return send_file(buf, mimetype="image/png", as_attachment=True,
                          download_name="catchment_map.png")
+
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    finally:
+        if fig is not None:
+            plt.close(fig)
+
+
+@app.route("/api/export_results", methods=["POST"])
+def api_export_results():
+    """Render map PNG + export GeoJSON layers → return as a single ZIP."""
+    data = request.json or {}
+    if not _all_results:
+        return jsonify({"error": "No delineation results to export."}), 400
+
+    fig = None
+    try:
+        # ── Render PNG (same logic as api_print_map) ────────────────────────
+        title       = data.get("title", "Catchment Map")
+        outlet_info = data.get("outlets", [])
+        paper       = data.get("paper", "A4")
+        orient      = data.get("orientation", "landscape")
+        _req_thresh = data.get("acc_threshold")
+        acc_thresh  = int(_req_thresh) if _req_thresh is not None else (
+            _all_results[-1]["stats"].get("acc_threshold") or 500)
+
+        sizes = {"A4": (13.69, 8.27), "A3": (18.54, 11.69), "Letter": (13.0, 8.5)}
+        fw, fh = sizes.get(paper, sizes["A4"])
+        if orient == "portrait":
+            fw, fh = fh, fw
+
+        lookup = {int(o["id"]): o for o in outlet_info}
+        all_catches, all_outlet_feats = [], []
+        for i, r in enumerate(_all_results):
+            oid  = i + 1
+            info = lookup.get(oid, {})
+            name  = (info.get("name") or "").strip() or f"Catchment {oid}"
+            color = info.get("color", "#3399ff")
+            for feat in r["catchment"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_catches.append(f2)
+            for feat in r["outlet"]["features"]:
+                f2 = dict(feat)
+                f2["properties"] = {**f2.get("properties", {}),
+                                     "outlet_id": oid, "name": name, "color": color}
+                all_outlet_feats.append(f2)
+
+        catches_gdf = gpd.GeoDataFrame.from_features(all_catches, crs=4326)
+        outlets_gdf = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+        catchment_union = catches_gdf.unary_union
+
+        rivers_fc   = extract_rivers_global(acc_thresh)
+        rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                           if rivers_fc.get("features") else gpd.GeoDataFrame())
+        rivers_gdf = (rivers_gdf_full.clip(catchment_union)
+                      if not rivers_gdf_full.empty else gpd.GeoDataFrame())
+
+        tb = catches_gdf.total_bounds
+        pw = (tb[2] - tb[0]) * 0.12; ph = (tb[3] - tb[1]) * 0.12
+        xmin, xmax = tb[0] - pw, tb[2] + pw
+        ymin, ymax = tb[1] - ph, tb[3] + ph
+        data_w = xmax - xmin; data_h = ymax - ymin
+        map_aspect = fw * 0.82 / (fh * 0.80)
+        if data_w / data_h < map_aspect:
+            delta = data_h * map_aspect - data_w; xmin -= delta/2; xmax += delta/2
+        else:
+            delta = data_w / map_aspect - data_h; ymin -= delta/2; ymax += delta/2
+
+        RIVER_COLORS = ["#aacce8","#6aaed6","#3182bd","#1a5ea0","#0d3a78","#062050"]
+        fig = plt.figure(figsize=(fw, fh), facecolor="white")
+        ax  = fig.add_axes([0.09, 0.11, 0.82, 0.80])
+        ax.set_facecolor("#dde8f0"); ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+
+        _deg_span = max(xmax - xmin, ymax - ymin)
+        _map_zoom = max(7, min(11, int(math.log2(max(8 * 360 / max(_deg_span, 0.001), 1)))))
+        try:
+            import contextily as ctx
+            ctx.add_basemap(ax, crs="EPSG:4326", source=ctx.providers.CartoDB.Positron,
+                            attribution=False, zoom=_map_zoom)
+        except Exception:
+            pass
+        ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
+        ax.tick_params(labelsize=7, direction="out", color="#777")
+        ax.set_xlabel("Longitude (°E)", fontsize=8, color="#444", labelpad=4)
+        ax.set_ylabel("Latitude (°N)",  fontsize=8, color="#444", labelpad=4)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#888"); spine.set_linewidth(0.8)
+
+        if _cache and "dem_arr" in _cache:
+            try:
+                _rgba, _hs_ext = _get_hillshade_rgba(catchment_union)
+                if _rgba is not None:
+                    ax.imshow(_rgba, extent=_hs_ext, origin="upper", zorder=1,
+                              interpolation="nearest", aspect="auto")
+            except Exception:
+                traceback.print_exc()
+
+        for _, row in catches_gdf.iterrows():
+            color = row.get("color", "#3399ff")
+            gdf_r = gpd.GeoDataFrame([row], crs=4326)
+            gdf_r.plot(ax=ax, color=color, alpha=0.12, linewidth=0, zorder=2)
+            gdf_r.boundary.plot(ax=ax, color=color, linewidth=1.8, linestyle="--", zorder=3)
+
+        if not rivers_gdf.empty and "order" in rivers_gdf.columns:
+            for order in sorted(rivers_gdf["order"].unique()):
+                sub = rivers_gdf[rivers_gdf["order"] == order]
+                lw  = max(0.5, int(order) * 0.6 + 0.4)
+                sub.plot(ax=ax, color=RIVER_COLORS[min(int(order)-1, 5)], linewidth=lw, zorder=4)
+
+        for _, row in outlets_gdf.iterrows():
+            color = row.get("color", "#ff4444")
+            name  = row.get("name", f"Outlet {row.get('outlet_id','')}")
+            x, y  = row.geometry.x, row.geometry.y
+            ax.plot(x, y, "o", color=color, markersize=7,
+                    markeredgecolor="white", markeredgewidth=1.5, zorder=6)
+            ax.annotate(name, (x, y), textcoords="offset points", xytext=(8, 5),
+                        fontsize=7.5, fontweight="bold", color="#1a2030", zorder=7,
+                        bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.85))
+
+        _pm_north_arrow(ax); _pm_scale_bar(ax, xmin, xmax, ymin, ymax)
+        _pm_legend(ax, outlet_info, rivers_gdf); _pm_locator_map(ax, catches_gdf, xmin, xmax, ymin, ymax)
+        fig.text(0.5, 0.945, title, ha="center", va="center",
+                 fontsize=15, fontweight="bold", color="#1a2030")
+        fig.text(0.09, 0.030,
+                 "Projection: WGS84 (EPSG:4326)  ·  Stream network: Strahler ordering"
+                 "  ·  DEM: SRTM GL1 30 m  ·  Generated with Catchment Delineation Tool",
+                 ha="left", va="bottom", fontsize=6.0, color="#999", style="italic")
+
+        png_buf = io.BytesIO()
+        fig.savefig(png_buf, format="png", dpi=110, pil_kwargs={"compress_level": 0})
+        png_buf.seek(0)
+        png_bytes = png_buf.read()
+
+        # ── Build GeoJSON layers ────────────────────────────────────────────
+        rivers_fc_full = extract_rivers_global(acc_thresh)
+        rivers_all_gdf = (gpd.GeoDataFrame.from_features(rivers_fc_full["features"], crs=4326)
+                          if rivers_fc_full.get("features") else gpd.GeoDataFrame())
+
+        def _gdf_to_geojson_bytes(gdf):
+            return gdf.to_json(indent=2).encode("utf-8") if not gdf.empty else b'{"type":"FeatureCollection","features":[]}'
+
+        # ── Assemble ZIP ────────────────────────────────────────────────────
+        zip_buf = io.BytesIO()
+        safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', title).strip() or "catchment_results"
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("catchment_map.png",   png_bytes)
+            zf.writestr("catchments.geojson",  _gdf_to_geojson_bytes(catches_gdf))
+            zf.writestr("outlets.geojson",     _gdf_to_geojson_bytes(outlets_gdf))
+            zf.writestr("rivers.geojson",      _gdf_to_geojson_bytes(rivers_all_gdf))
+        zip_buf.seek(0)
+        return send_file(zip_buf, mimetype="application/zip",
+                         as_attachment=True, download_name=f"{safe_title}.zip")
 
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
