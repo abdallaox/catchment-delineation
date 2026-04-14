@@ -12,7 +12,8 @@ Environment variables:
     OPENTOPO_API_KEY  — OpenTopography API key (fallback to hard-coded key)
 """
 
-import os, sys, io, json, math, re, zipfile, tempfile, warnings, traceback, shutil, datetime, base64, html as _html_mod
+import os, sys, io, json, math, re, zipfile, tempfile, warnings, traceback, shutil, datetime, base64, html as _html_mod, uuid, threading
+from contextlib import contextmanager
 import numpy as np
 import rasterio
 import rasterio.features
@@ -57,6 +58,21 @@ except Exception:
     pass
 NODATA = -9999.0
 
+# ── Stripe ─────────────────────────────────────────────────────────────────────
+try:
+    import stripe as _stripe
+    _stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+except ImportError:
+    _stripe = None
+
+STRIPE_PRICE_CENTS = int(os.environ.get("STRIPE_PRICE_CENTS", "500"))   # $5.00
+STRIPE_CURRENCY    = os.environ.get("STRIPE_CURRENCY", "usd")
+STRIPE_PRODUCT_NAME = os.environ.get("STRIPE_PRODUCT_NAME", "Catchment Results Export")
+
+# Temporary in-memory store: export_token → export params
+# Tokens are single-use (cleared after download)
+_pending_exports: dict = {}
+
 # ── D8 lookup ──────────────────────────────────────────────────────────────────
 D8_DIRMAP = (64, 128, 1, 2, 4, 8, 16, 32)
 D8_DELTAS = {64:(-1,0), 128:(-1,1), 1:(0,1), 2:(1,1),
@@ -77,6 +93,48 @@ _RMT = "#445566"       # text mid
 _cache        = {}            # Conditioned DEM + fdir/acc arrays
 _all_results  = []            # All delineation results, one per outlet placed
                                                # River network is cached inside _cache["rivers_cache"]
+
+# ── Agent API v1 — per-session state ──────────────────────────────────────────
+_sessions:          dict = {}   # session_id → {cache, results, dem_progress}
+_session_lock            = threading.Lock()
+_v1_export_tokens:  dict = {}   # token → (zip_bytes, safe_title)
+
+
+@contextmanager
+def _use_session(session_id):
+    """Temporarily swap module-level globals to this session's state (thread-safe).
+
+    All existing helper functions (load_and_condition, delineate, extract_rivers_global,
+    _emit*, etc.) read/write _cache, _all_results, _dem_progress as globals.  This context
+    manager redirects those globals to the session's own dicts for the duration of the
+    request, then restores the originals — leaving the web-UI routes completely unaffected.
+    """
+    global _cache, _all_results, _dem_progress
+    if session_id not in _sessions:
+        raise KeyError(f"Session '{session_id}' not found. "
+                       "Create one via POST /api/v1/session")
+    sess = _sessions[session_id]
+    with _session_lock:
+        _saved        = (_cache, _all_results, _dem_progress)
+        _cache        = sess["cache"]
+        _all_results  = sess["results"]
+        _dem_progress = sess["dem_progress"]
+        try:
+            yield sess
+        finally:
+            _cache, _all_results, _dem_progress = _saved
+
+
+def _v1_sid(data=None):
+    """Extract session_id from JSON body, ?session_id= query param, or X-Session-Id header."""
+    if data:
+        sid = data.get("session_id")
+        if sid:
+            return sid
+    sid = request.args.get("session_id")
+    if sid:
+        return sid
+    return request.headers.get("X-Session-Id")
 
 # ── Naturalearth countries cache (downloaded once per process) ─────────────────
 _NE_COUNTRIES_CACHE = os.path.join(os.path.dirname(__file__), "data", "ne_110m_countries.geojson")
@@ -1708,12 +1766,10 @@ def api_print_map():
             plt.close(fig)
 
 
-@app.route("/api/export_results", methods=["POST"])
-def api_export_results():
-    """Render map PNG + export GeoJSON layers → return as a single ZIP."""
-    data = request.json or {}
+def _build_export_zip(data: dict) -> io.BytesIO:
+    """Render map PNG + GeoJSON layers into a ZIP buffer. Raises on error."""
     if not _all_results:
-        return jsonify({"error": "No delineation results to export."}), 400
+        raise ValueError("No delineation results to export.")
 
     fig = None
     try:
@@ -1852,14 +1908,149 @@ def api_export_results():
             zf.writestr("outlets.geojson",     _gdf_to_geojson_bytes(outlets_gdf))
             zf.writestr("rivers.geojson",      _gdf_to_geojson_bytes(rivers_all_gdf))
         zip_buf.seek(0)
-        return send_file(zip_buf, mimetype="application/zip",
-                         as_attachment=True, download_name=f"{safe_title}.zip")
+        return zip_buf, safe_title
 
-    except Exception as e:
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    except Exception:
+        raise
     finally:
         if fig is not None:
             plt.close(fig)
+
+
+@app.route("/api/export_results", methods=["POST"])
+def api_export_results():
+    """Direct export (no payment) — kept for internal use / testing."""
+    if not _all_results:
+        return jsonify({"error": "No delineation results to export."}), 400
+    try:
+        zip_buf, safe_title = _build_export_zip(request.json or {})
+        return send_file(zip_buf, mimetype="application/zip",
+                         as_attachment=True, download_name=f"{safe_title}.zip")
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ── Stripe checkout ────────────────────────────────────────────────────────────
+
+@app.route("/api/create_checkout_session", methods=["POST"])
+def api_create_checkout_session():
+    if not _stripe or not _stripe.api_key:
+        return jsonify({"error": "Stripe is not configured on the server."}), 503
+    if not _all_results:
+        return jsonify({"error": "No delineation results — run the analysis first."}), 400
+
+    params = request.get_json(force=True) or {}
+    base   = request.host_url.rstrip("/")
+
+    # Store params under a random token so the success redirect can retrieve them
+    token = uuid.uuid4().hex
+    _pending_exports[token] = params
+
+    try:
+        session = _stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency":    STRIPE_CURRENCY,
+                    "unit_amount": STRIPE_PRICE_CENTS,
+                    "product_data": {"name": STRIPE_PRODUCT_NAME},
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            success_url=f"{base}/payment/success?token={token}&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base}/",
+            metadata={"export_token": token},
+        )
+        return jsonify({"checkout_url": session.url})
+    except Exception as e:
+        _pending_exports.pop(token, None)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payment/success")
+def payment_success():
+    token      = request.args.get("token", "")
+    session_id = request.args.get("session_id", "")
+
+    # Verify payment with Stripe
+    error_msg = None
+    if not _stripe or not _stripe.api_key:
+        error_msg = "Stripe not configured."
+    elif not session_id:
+        error_msg = "Missing session ID."
+    else:
+        try:
+            sess = _stripe.checkout.Session.retrieve(session_id)
+            if sess.payment_status != "paid":
+                error_msg = "Payment has not been completed."
+        except Exception as e:
+            error_msg = f"Could not verify payment: {e}"
+
+    if error_msg:
+        return f"""<!DOCTYPE html><html><head><title>Payment Error</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:60px">
+  <h2 style="color:#c00">Payment verification failed</h2>
+  <p>{error_msg}</p>
+  <a href="/" style="color:#1a7acc">← Return to app</a>
+</body></html>""", 402
+
+    title = ((_pending_exports.get(token) or {}).get("title") or "catchment_results")
+    safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', title).strip() or "catchment_results"
+    download_url = f"/api/download_export/{token}"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Payment successful — Catchment Results</title>
+  <style>
+    body {{ margin:0; font-family:'Segoe UI',sans-serif; background:#0b151f; color:#cdd9e5;
+           display:flex; align-items:center; justify-content:center; min-height:100vh; }}
+    .card {{ background:#0f1f2e; border:1px solid #1e3a55; border-radius:12px;
+             padding:48px 56px; text-align:center; max-width:460px; }}
+    h2 {{ color:#4fc97e; font-size:1.6rem; margin:0 0 12px; }}
+    p  {{ color:#8dafc4; font-size:14px; margin:0 0 28px; line-height:1.6; }}
+    .dl-btn {{ display:inline-block; background:#155f38; color:#fff; text-decoration:none;
+               padding:13px 28px; border-radius:8px; font-weight:600; font-size:14px;
+               transition:background .2s; }}
+    .dl-btn:hover {{ background:#1f7046; }}
+    .back {{ display:block; margin-top:18px; font-size:12px; color:#5a7f99; text-decoration:none; }}
+    .back:hover {{ color:#8dafc4; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div style="font-size:48px;margin-bottom:16px">✅</div>
+    <h2>Payment successful!</h2>
+    <p>Your catchment results are ready.<br>
+       Click below to download the ZIP file containing the map image and GeoJSON layers.</p>
+    <a class="dl-btn" href="{download_url}" download="{safe_title}.zip">
+      ⬇ Download {safe_title}.zip
+    </a>
+    <a class="back" href="/">← Return to the app</a>
+  </div>
+  <script>
+    // Auto-trigger download after a short delay
+    setTimeout(() => window.location.href = '{download_url}', 1200);
+  </script>
+</body>
+</html>"""
+
+
+@app.route("/api/download_export/<token>")
+def api_download_export(token):
+    params = _pending_exports.get(token)
+    if not params:
+        return jsonify({"error": "Export not found or already downloaded. "
+                                 "Return to the app and generate a new export."}), 404
+    try:
+        zip_buf, safe_title = _build_export_zip(params)
+        _pending_exports.pop(token, None)   # single-use token
+        return send_file(zip_buf, mimetype="application/zip",
+                         as_attachment=True, download_name=f"{safe_title}.zip")
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3067,6 +3258,667 @@ def api_upload_shapefile():
             return jsonify({"geojson": json.loads(gdf.to_json()), "name": layer_name})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AGENT API  —  /api/v1/   (session-isolated, CORS-enabled)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Typical agent workflow
+#  ──────────────────────
+#  1. POST /api/v1/session                 → {session_id}
+#  2. POST /api/v1/dem/fetch               → {bounds, res_m, default_acc, …}
+#     GET  /api/v1/dem/status?session_id=… → poll {pct, done}   (optional)
+#  3. POST /api/v1/delineate  (×N)         → {catchment, outlet, stats}
+#  4. POST /api/v1/report                  → {html, filename}
+#  5. POST /api/v1/export                  → {download_url, token, filename}
+#     GET  /api/v1/export/download/<token> → ZIP binary (single-use)
+#  6. DELETE /api/v1/session/<id>          → cleanup
+#
+#  Pass session_id in the JSON body, as ?session_id= query param,
+#  or in the X-Session-Id request header.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+
+@app.after_request
+def _v1_cors(response):
+    if request.path.startswith("/api/v1"):
+        response.headers["Access-Control-Allow-Origin"]  = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Session-Id"
+    return response
+
+
+@app.route("/api/v1/", defaults={"path": ""}, methods=["OPTIONS"])
+@app.route("/api/v1/<path:path>",              methods=["OPTIONS"])
+def _v1_preflight(path):
+    from flask import Response as _FR
+    r = _FR()
+    r.headers["Access-Control-Allow-Origin"]  = "*"
+    r.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+    r.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Session-Id"
+    return r, 204
+
+
+# ── Discovery ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1")
+@app.route("/api/v1/")
+def v1_index():
+    """Structured API reference — every endpoint, field, type, and example."""
+    return jsonify({
+        "name":        "Catchment Delineation Agent API",
+        "version":     "1.0",
+        "base_url":    request.host_url.rstrip("/"),
+        "description": (
+            "Delineates river catchments from a 30 m SRTM DEM. "
+            "Given a bounding box or polygon, downloads the elevation data, "
+            "computes D8 flow direction and accumulation, snaps an outlet point "
+            "to the nearest stream, traces the upstream catchment boundary, and "
+            "produces a GeoJSON result set, a self-contained HTML report, and a "
+            "ZIP export (map PNG + GeoJSON layers)."
+        ),
+        "auth": "None. No API key required.",
+        "session_id_passing": (
+            "Every endpoint requires a session_id. Pass it in ONE of: "
+            "(a) JSON body field 'session_id', "
+            "(b) query param ?session_id=…, "
+            "(c) request header X-Session-Id."
+        ),
+        "error_format": {
+            "description": "All errors return HTTP 4xx/5xx with JSON body.",
+            "schema":      {"error": "string — human-readable message",
+                            "trace": "string — Python traceback (only on 500)"},
+            "example":     {"error": "No DEM loaded. Call /api/v1/dem/fetch first."},
+        },
+        "workflow": [
+            "Step 1 — Create session:   POST /api/v1/session",
+            "Step 2 — Load DEM:         POST /api/v1/dem/fetch  (30-120 s, synchronous)",
+            "Step 3 — Delineate:        POST /api/v1/delineate  (repeat for each outlet)",
+            "Step 4 — Report:           POST /api/v1/report",
+            "Step 5 — Export ZIP:       POST /api/v1/export  then  GET download_url",
+            "Step 6 — Cleanup:          DELETE /api/v1/session/<id>",
+        ],
+        "endpoints": {
+            "POST /api/v1/session": {
+                "description": "Create a new isolated analysis session.",
+                "request_body": "Empty (no fields required).",
+                "response": {
+                    "session_id":  "string — use this in all subsequent calls",
+                    "created_at":  "string — ISO-8601 UTC timestamp",
+                },
+                "example_response": {"session_id": "a3f9…", "created_at": "2025-01-01T00:00:00Z"},
+            },
+            "DELETE /api/v1/session/<session_id>": {
+                "description": "Free a session and release its cached DEM data from memory.",
+                "response": {"ok": "true"},
+            },
+            "POST /api/v1/dem/fetch": {
+                "description": (
+                    "Download a 30 m SRTM DEM for the study area, compute flow direction "
+                    "and accumulation, and extract the river network. "
+                    "This is synchronous and may take 30-120 seconds depending on area size. "
+                    "Store default_acc — you will pass it as acc_threshold to /delineate."
+                ),
+                "request_body": {
+                    "session_id":  "string REQUIRED",
+                    "bbox":        "object — {south, north, west, east} in decimal degrees WGS84. Use this OR polygon.",
+                    "polygon":     "object — GeoJSON Polygon geometry (type+coordinates). Use this OR bbox.",
+                },
+                "response": {
+                    "bounds":           "object — {south, north, west, east} actual DEM extent",
+                    "res_m":            "number — DEM cell size in metres (typically ~30)",
+                    "shape":            "array  — [rows, cols] of the DEM grid",
+                    "acc_p95":          "number — 95th-percentile flow accumulation value",
+                    "default_acc":      "integer — recommended acc_threshold for stream extraction (use this in /delineate)",
+                    "n_river_segments": "integer — number of river segments at default threshold",
+                    "dem_source":       "string — data source label (e.g. 'OpenTopography SRTM GL1 (30 m)')",
+                },
+                "example_request":  {"session_id": "a3f9…", "bbox": {"south": 51.80, "north": 51.88, "west": -3.55, "east": -3.40}},
+                "example_response": {"bounds": {"south": 51.80, "north": 51.88, "west": -3.55, "east": -3.40},
+                                     "res_m": 30.9, "shape": [288, 540], "acc_p95": 130.0,
+                                     "default_acc": 150, "n_river_segments": 582,
+                                     "dem_source": "OpenTopography SRTM GL1 (30 m)"},
+            },
+            "GET /api/v1/dem/status": {
+                "description": "Poll DEM processing progress. Optional — /dem/fetch is synchronous so this is only needed if you call it in a background thread.",
+                "query_params": {"session_id": "string REQUIRED"},
+                "response": {
+                    "stage":   "string — current step label",
+                    "detail":  "string — step detail",
+                    "pct":     "integer — 0-100 progress percentage",
+                    "done":    "boolean — true when processing is complete",
+                    "error":   "string|null — error message if failed",
+                    "source":  "string — DEM data source label",
+                },
+            },
+            "POST /api/v1/snap": {
+                "description": (
+                    "Snap a lat/lon point to the nearest stream cell. "
+                    "Useful to confirm the outlet location before delineating. "
+                    "/delineate does this automatically, so calling snap first is optional."
+                ),
+                "request_body": {
+                    "session_id":    "string REQUIRED",
+                    "lat":           "number REQUIRED — latitude in decimal degrees",
+                    "lon":           "number REQUIRED — longitude in decimal degrees",
+                    "acc_threshold": "integer OPTIONAL — stream threshold in cells (default 500; use default_acc from /dem/fetch)",
+                },
+                "response": {
+                    "lat":     "number — snapped latitude",
+                    "lon":     "number — snapped longitude",
+                    "snapped": "boolean — true if the point was moved to a stream cell",
+                    "acc":     "integer — flow accumulation at the snapped cell",
+                },
+            },
+            "POST /api/v1/delineate": {
+                "description": (
+                    "Delineate the upstream catchment for one outlet point. "
+                    "Automatically snaps the point to the nearest stream cell. "
+                    "Call multiple times to accumulate multiple catchments — "
+                    "all results are used together by /report and /export."
+                ),
+                "request_body": {
+                    "session_id":    "string  REQUIRED",
+                    "lat":           "number  REQUIRED — outlet latitude (decimal degrees)",
+                    "lon":           "number  REQUIRED — outlet longitude (decimal degrees)",
+                    "acc_threshold": "integer OPTIONAL — stream threshold (default 500; use default_acc from /dem/fetch)",
+                },
+                "response": {
+                    "catchment": "GeoJSON FeatureCollection — polygon of the catchment boundary. Properties: {cells, area_km2}",
+                    "outlet":    "GeoJSON FeatureCollection — snapped outlet point. Properties: {acc}",
+                    "stats": {
+                        "area_km2":       "number  — catchment area in km²",
+                        "catchment_cells":"integer — number of DEM cells in catchment",
+                        "max_strahler":   "integer — highest Strahler stream order within catchment",
+                        "outlet_lat":     "number  — snapped outlet latitude",
+                        "outlet_lon":     "number  — snapped outlet longitude",
+                        "snapped":        "boolean — whether outlet was moved to nearest stream",
+                        "acc_threshold":  "integer — threshold used",
+                        "dem_res_m":      "number  — DEM resolution in metres",
+                    },
+                },
+                "example_request":  {"session_id": "a3f9…", "lat": 51.83, "lon": -3.47, "acc_threshold": 150},
+                "example_response": {
+                    "catchment": {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": ["…"]}, "properties": {"cells": 321, "area_km2": 0.31}}]},
+                    "outlet":    {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [-3.470556, 51.828611]}, "properties": {"acc": 321}}]},
+                    "stats":     {"area_km2": 0.31, "catchment_cells": 321, "max_strahler": 1, "outlet_lat": 51.828611, "outlet_lon": -3.470556, "snapped": True, "acc_threshold": 150, "dem_res_m": 30.9},
+                },
+            },
+            "GET /api/v1/results": {
+                "description": "List all catchments delineated so far in this session.",
+                "query_params": {"session_id": "string REQUIRED"},
+                "response": {
+                    "count":   "integer — number of delineated catchments",
+                    "results": "array   — each item has {index, stats, catchment:GeoJSON, outlet:GeoJSON}",
+                },
+            },
+            "POST /api/v1/clear": {
+                "description": "Clear all delineation results but keep the DEM loaded. Useful to start over without re-downloading the DEM.",
+                "request_body": {"session_id": "string REQUIRED"},
+                "response": {"ok": "true"},
+            },
+            "POST /api/v1/rivers": {
+                "description": "Extract the river network GeoJSON at a given flow-accumulation threshold.",
+                "request_body": {
+                    "session_id":    "string  REQUIRED",
+                    "acc_threshold": "integer OPTIONAL — cells threshold (default 500; lower = more streams)",
+                },
+                "response": {
+                    "rivers":     "GeoJSON FeatureCollection of LineStrings. Each feature: {order:int (Strahler), acc:int}",
+                    "n_segments": "integer — number of river segments returned",
+                },
+            },
+            "POST /api/v1/report": {
+                "description": (
+                    "Generate a full catchment analysis HTML report. "
+                    "The returned html string is a completely self-contained document "
+                    "(inline CSS, base64 images) — save it directly as a .html file."
+                ),
+                "request_body": {
+                    "session_id":    "string REQUIRED",
+                    "title":         "string OPTIONAL — report title (default 'Catchment Analysis Report')",
+                    "author":        "string OPTIONAL — author name shown on report",
+                    "acc_threshold": "integer OPTIONAL — river threshold for the map (default: value used in last /delineate call)",
+                    "outlets":       "array OPTIONAL — [{id:int, name:str, color:str}] to label each catchment. id is 1-based index.",
+                },
+                "response": {
+                    "html":     "string — full self-contained HTML document",
+                    "filename": "string — suggested save filename (e.g. 'My Report_report.html')",
+                },
+                "example_request": {"session_id": "a3f9…", "title": "Wye Catchment Study", "author": "GIS Agent",
+                                    "outlets": [{"id": 1, "name": "Main Outlet", "color": "#3399ff"}]},
+            },
+            "POST /api/v1/export": {
+                "description": (
+                    "Build a ZIP containing a print-quality map PNG and GeoJSON layers. "
+                    "Returns a single-use download token — GET the download_url once to retrieve the file. "
+                    "ZIP contents: catchment_map.png, catchments.geojson, outlets.geojson, rivers.geojson."
+                ),
+                "request_body": {
+                    "session_id":   "string  REQUIRED",
+                    "title":        "string  OPTIONAL — map title and ZIP filename stem",
+                    "acc_threshold":"integer OPTIONAL — river threshold for the map",
+                    "paper":        "string  OPTIONAL — 'A4' | 'A3' | 'Letter'  (default 'A4')",
+                    "orientation":  "string  OPTIONAL — 'landscape' | 'portrait'  (default 'landscape')",
+                    "outlets":      "array   OPTIONAL — [{id:int, name:str, color:str}]",
+                },
+                "response": {
+                    "token":        "string — single-use download token",
+                    "filename":     "string — suggested ZIP filename",
+                    "download_url": "string — full URL; GET this once to download the ZIP",
+                },
+                "important": "The download token is consumed on first use. Call /api/v1/export again to get a new token.",
+            },
+            "GET /api/v1/export/download/<token>": {
+                "description": "Download the pre-built export ZIP. Single-use — token is deleted after download.",
+                "response": "application/zip binary stream",
+            },
+        },
+    })
+
+
+# ── Session ───────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/session", methods=["POST"])
+def v1_create_session():
+    """Create a new isolated analysis session. Returns session_id."""
+    sid = uuid.uuid4().hex
+    _sessions[sid] = {
+        "cache":        {},
+        "results":      [],
+        "dem_progress": {
+            "stage": "", "detail": "", "pct": 0,
+            "source": "", "fallback_reason": "", "error": None, "done": False,
+        },
+        "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    return jsonify({"session_id": sid, "created_at": _sessions[sid]["created_at"]})
+
+
+@app.route("/api/v1/session/<sid>", methods=["DELETE"])
+def v1_delete_session(sid):
+    """Free a session and release its cached DEM data."""
+    _sessions.pop(sid, None)
+    return jsonify({"ok": True})
+
+
+# ── DEM ───────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/dem/fetch", methods=["POST"])
+def v1_fetch_dem():
+    """
+    Download + process a DEM for a study area (synchronous — may take 30-120 s).
+
+    Body (JSON):
+      session_id   string    required
+      polygon      object    GeoJSON Polygon geometry  ─┐ one of
+      bbox         object    {south, north, west, east} ─┘ these two
+
+    Returns:
+      bounds           {south, north, west, east}
+      res_m            DEM resolution in metres
+      shape            [rows, cols]
+      acc_p95          95th-percentile flow-accumulation value
+      default_acc      recommended stream threshold (cells)
+      n_river_segments number of river segments extracted
+      dem_source       data source label
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id. "
+                                 "Create one via POST /api/v1/session"}), 400
+
+    polygon = data.get("polygon")
+    if not polygon and "bbox" in data:
+        b = data["bbox"]
+        s = float(b["south"]); n = float(b["north"])
+        w = float(b["west"]);  e = float(b["east"])
+        polygon = {"type": "Polygon",
+                   "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}
+    if not polygon:
+        return jsonify({"error": "Provide 'polygon' (GeoJSON Polygon geometry) or "
+                                 "'bbox': {south, north, west, east}"}), 400
+
+    try:
+        with _use_session(sid):
+            coords = polygon["coordinates"][0]
+            lats   = [c[1] for c in coords]
+            lons   = [c[0] for c in coords]
+            south, north = min(lats), max(lats)
+            west,  east  = min(lons), max(lons)
+            _dem_progress.update({"stage": "Starting…", "detail": "", "pct": 0,
+                                   "source": "", "fallback_reason": "",
+                                   "error": None, "done": False})
+            _emit("Contacting OpenTopography…",
+                  f"Bbox: {south:.3f}°–{north:.3f}°N, {west:.3f}°–{east:.3f}°E", pct=1)
+            dem_path = fetch_dem_bbox(south, north, west, east)
+            _emit("Clipping to study area…", "Masking cells outside polygon", pct=20)
+            dem_path = clip_dem_to_polygon(dem_path, polygon)
+            _all_results.clear()
+            load_and_condition(dem_path)
+
+            wb  = _cache["bounds_wgs"]
+            acc = _cache["acc_arr"]
+            p95 = float(np.percentile(acc[acc > 0], 95)) if (acc > 0).any() else 500
+            default_acc = int(round(p95 / 50) * 50)
+            _emit("Extracting river network…",
+                  f"Auto-selecting threshold ≈{default_acc} cells", pct=93)
+            default_acc, rivers = _auto_threshold(default_acc)
+            n_segs = len(rivers.get("features", []))
+            _emit_done(f"DEM ready · {_cache['shape'][0]}×{_cache['shape'][1]} cells "
+                       f"· {n_segs} river segments")
+            return jsonify({
+                "bounds":           {"south": wb[1], "west": wb[0],
+                                     "north": wb[3], "east": wb[2]},
+                "res_m":            round(abs(_cache["affine"].a) * 111320, 1),
+                "shape":            list(_cache["shape"]),
+                "acc_p95":          p95,
+                "default_acc":      default_acc,
+                "n_river_segments": n_segs,
+                "dem_source":       _dem_progress.get("source",
+                                                      "OpenTopography SRTM GL1 (30 m)"),
+            })
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/v1/dem/status")
+def v1_dem_status():
+    """
+    Poll DEM processing progress.
+    Query param or body: session_id
+    Returns: {stage, detail, pct, done, error, source}
+    """
+    sid = _v1_sid()
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    return jsonify(_sessions[sid]["dem_progress"])
+
+
+# ── Snap & Delineate ──────────────────────────────────────────────────────────
+
+@app.route("/api/v1/snap", methods=["POST"])
+def v1_snap():
+    """
+    Snap a lat/lon to the nearest stream cell.
+
+    Body: {session_id, lat, lon, acc_threshold?:int (default 500)}
+    Returns: {lat, lon, snapped:bool, acc:int}
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    try:
+        with _use_session(sid):
+            if not _cache:
+                return jsonify({"error": "No DEM loaded. "
+                                         "Call /api/v1/dem/fetch first."}), 400
+            lat           = float(data["lat"])
+            lon           = float(data["lon"])
+            acc_threshold = int(data.get("acc_threshold", 500))
+            row, col      = latlon_to_rowcol(lat, lon)
+            s_row, s_col  = snap_to_stream(row, col, acc_threshold)
+            ox, oy        = rio_transform.xy(_cache["affine"], s_row, s_col)
+            return jsonify({
+                "lat":     float(oy),
+                "lon":     float(ox),
+                "snapped": (s_row != row or s_col != col),
+                "acc":     int(_cache["acc_arr"][s_row, s_col]),
+            })
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/v1/delineate", methods=["POST"])
+def v1_delineate():
+    """
+    Delineate a catchment at an outlet point.
+
+    Body: {session_id, lat, lon, acc_threshold?:int (default 500)}
+    Returns: {catchment:GeoJSON_FeatureCollection,
+              outlet:GeoJSON_FeatureCollection,
+              stats:{area_km2, catchment_cells, max_strahler,
+                     outlet_lat, outlet_lon, snapped, acc_threshold}}
+
+    Call multiple times to accumulate results for multi-outlet analysis.
+    All accumulated results are used by /api/v1/report and /api/v1/export.
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    try:
+        with _use_session(sid):
+            if not _cache:
+                return jsonify({"error": "No DEM loaded. "
+                                         "Call /api/v1/dem/fetch first."}), 400
+            result = delineate(
+                lat=float(data["lat"]),
+                lon=float(data["lon"]),
+                acc_threshold=int(data.get("acc_threshold", 500)),
+            )
+            if "error" not in result:
+                _all_results.append(result)
+            return jsonify(result)
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ── Results ───────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/results")
+def v1_results():
+    """List all delineated catchments for this session (query: session_id)."""
+    sid = _v1_sid()
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    results = _sessions[sid]["results"]
+    return jsonify({
+        "count":   len(results),
+        "results": [
+            {"index":    i,
+             "stats":    r["stats"],
+             "catchment": r["catchment"],
+             "outlet":   r["outlet"]}
+            for i, r in enumerate(results)
+        ],
+    })
+
+
+@app.route("/api/v1/clear", methods=["POST"])
+def v1_clear():
+    """Clear delineation results but keep the DEM loaded. Body: {session_id}"""
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    _sessions[sid]["results"].clear()
+    return jsonify({"ok": True})
+
+
+# ── Rivers ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/rivers", methods=["POST"])
+def v1_rivers():
+    """
+    Extract river-network GeoJSON at a given accumulation threshold.
+
+    Body: {session_id, acc_threshold?:int}
+      Use the default_acc value returned by /api/v1/dem/fetch as a starting point.
+    Returns: {rivers:GeoJSON_FeatureCollection, n_segments:int}
+      Each feature has properties: {order:int (Strahler), acc:int}
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    try:
+        with _use_session(sid):
+            if not _cache:
+                return jsonify({"error": "No DEM loaded. "
+                                         "Call /api/v1/dem/fetch first."}), 400
+            acc_threshold = int(data.get("acc_threshold", 500))
+            rivers = extract_rivers_global(acc_threshold)
+            return jsonify({"rivers":     rivers,
+                             "n_segments": len(rivers.get("features", []))})
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ── Report ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/report", methods=["POST"])
+def v1_report():
+    """
+    Generate a full HTML catchment analysis report.
+
+    Body: {session_id,
+           title?:str,
+           author?:str,
+           acc_threshold?:int,
+           outlets?:[{id:int, name:str, color:str}]}
+    Returns: {html:str, filename:str}
+      html is a fully self-contained HTML document (inline CSS + base64 images).
+      Save it directly as a .html file or display it in a webview.
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    try:
+        with _use_session(sid):
+            if not _all_results:
+                return jsonify({"error": "No delineation results. "
+                                         "Call /api/v1/delineate first."}), 400
+            title       = data.get("title",  "Catchment Analysis Report")
+            author      = data.get("author", "")
+            outlet_info = data.get("outlets", [])
+            _req_thresh = data.get("acc_threshold")
+            acc_thresh  = (int(_req_thresh) if _req_thresh is not None
+                           else (_all_results[-1]["stats"].get("acc_threshold") or 500))
+            dem_source  = _dem_progress.get("source", "SRTM GL1 (30 m)")
+            res_m       = round(abs(_cache["affine"].a) * 111320, 1) if _cache else 30
+            date_str    = datetime.datetime.now().strftime("%d %B %Y")
+
+            all_catches, all_outlet_feats = [], []
+            lookup = {int(o["id"]): o for o in outlet_info}
+            for i, r in enumerate(_all_results):
+                oid   = i + 1
+                info  = lookup.get(oid, {})
+                name  = (info.get("name") or "").strip() or f"Catchment {oid}"
+                color = info.get("color", "#3399ff")
+                for feat in r["catchment"]["features"]:
+                    f2 = dict(feat)
+                    f2["properties"] = {**f2.get("properties", {}),
+                                         "outlet_id": oid, "name": name, "color": color}
+                    all_catches.append(f2)
+                for feat in r["outlet"]["features"]:
+                    f2 = dict(feat)
+                    f2["properties"] = {**f2.get("properties", {}),
+                                         "outlet_id": oid, "name": name, "color": color}
+                    all_outlet_feats.append(f2)
+
+            catches_gdf     = gpd.GeoDataFrame.from_features(all_catches,      crs=4326)
+            outlets_gdf     = gpd.GeoDataFrame.from_features(all_outlet_feats, crs=4326)
+            catchment_union = catches_gdf.unary_union
+
+            rivers_fc       = extract_rivers_global(acc_thresh)
+            rivers_gdf_full = (gpd.GeoDataFrame.from_features(rivers_fc["features"], crs=4326)
+                               if rivers_fc.get("features") else gpd.GeoDataFrame())
+            rivers_gdf      = (rivers_gdf_full.clip(catchment_union)
+                               if not rivers_gdf_full.empty else gpd.GeoDataFrame())
+
+            catch_stats  = _rpt_compute_stats(catches_gdf, outlets_gdf)
+            riv_stats    = _rpt_compute_river_stats(rivers_gdf)
+            map_b64      = _rpt_html_map(outlet_info, acc_thresh,
+                                          rivers_gdf_prebuilt=rivers_gdf)
+            strahler_b64 = _rpt_html_strahler_charts(riv_stats)
+            elev_b64     = _rpt_html_elev_chart(catch_stats)
+
+            html_str = _build_html_report(
+                title, author, date_str,
+                catch_stats, riv_stats,
+                dem_source, res_m, acc_thresh,
+                map_b64, strahler_b64, elev_b64,
+            )
+            safe = "".join(c for c in title if c.isalnum() or c in " _-")[:40].strip()
+            return jsonify({"html": html_str, "filename": f"{safe}_report.html"})
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ── Export ────────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/export", methods=["POST"])
+def v1_export():
+    """
+    Build a ZIP export (map PNG + GeoJSON layers) and return a single-use download token.
+
+    Body: {session_id,
+           title?:str,
+           acc_threshold?:int,
+           paper?:"A4"|"A3"|"Letter"  (default "A4"),
+           orientation?:"landscape"|"portrait"  (default "landscape"),
+           outlets?:[{id:int, name:str, color:str}]}
+    Returns: {token:str, filename:str, download_url:str}
+      GET the download_url once to retrieve the ZIP.  The token is consumed on use.
+    """
+    data = request.json or {}
+    sid  = _v1_sid(data)
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    try:
+        with _use_session(sid):
+            if not _all_results:
+                return jsonify({"error": "No delineation results. "
+                                         "Call /api/v1/delineate first."}), 400
+            zip_buf, safe_title = _build_export_zip(data)
+            zip_bytes = zip_buf.read()
+
+        token = uuid.uuid4().hex
+        _v1_export_tokens[token] = (zip_bytes, safe_title)
+        base = request.host_url.rstrip("/")
+        return jsonify({
+            "token":        token,
+            "filename":     f"{safe_title}.zip",
+            "download_url": f"{base}/api/v1/export/download/{token}",
+        })
+    except KeyError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/api/v1/export/download/<token>")
+def v1_export_download(token):
+    """Download a pre-built export ZIP. Token is single-use."""
+    entry = _v1_export_tokens.get(token)
+    if not entry:
+        return jsonify({"error": "Token not found or already used. "
+                                 "Re-call POST /api/v1/export for a new token."}), 404
+    zip_bytes, safe_title = entry
+    _v1_export_tokens.pop(token, None)
+    return send_file(
+        io.BytesIO(zip_bytes),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{safe_title}.zip",
+    )
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

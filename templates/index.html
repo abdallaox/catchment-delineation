@@ -169,18 +169,8 @@
     #preview-scroll.panning { cursor:grabbing; }
     #preview-img-wrap { position:absolute; transform-origin:0 0; line-height:0;
                         border-radius:4px; box-shadow:0 4px 24px rgba(0,0,0,.6); }
-    #preview-img { display:block; border-radius:4px; }
-    /* PREVIEW watermark — on top of figures, purely visual */
-    #preview-watermark { position:absolute; inset:0; pointer-events:none; overflow:hidden;
-                         border-radius:4px; z-index:10;
-                         display:flex; align-items:center; justify-content:center; }
-    #preview-watermark::before {
-      content:'PREVIEW';
-      font-size:clamp(48px, 10vw, 110px); font-weight:900; letter-spacing:.25em;
-      color:rgba(20,80,200,.42); transform:rotate(-35deg);
-      white-space:nowrap; user-select:none; pointer-events:none;
-      text-shadow:0 2px 12px rgba(10,40,120,.35);
-    }
+    #preview-img { display:none; }  /* hidden — used only for loading */
+    #preview-canvas { display:block; border-radius:4px; }
     /* Drag-over highlight */
     #map-area.drag-over::after { content:'Drop file to upload';
       position:absolute; inset:0; background:rgba(30,100,160,.35);
@@ -623,8 +613,8 @@
       </div>
       <div id="preview-scroll">
         <div id="preview-img-wrap">
-          <img id="preview-img" src="" alt="Print Preview"/>
-          <div id="preview-watermark"></div>
+          <img id="preview-img" src="" alt=""/><!-- hidden loader -->
+          <canvas id="preview-canvas"></canvas>
         </div>
       </div>
     </div>
@@ -970,12 +960,11 @@ function submitPrint() {
     const prevImg = document.getElementById('preview-img');
     if (prevImg._blobUrl) URL.revokeObjectURL(prevImg._blobUrl);
     const imgUrl = URL.createObjectURL(blob);
-    prevImg._blobUrl   = imgUrl;
-    prevImg._fileName  = 'catchment_map.png';
-    prevImg.src        = imgUrl;
-    // Reset zoom (image load event handles this)
-    const wrap = document.getElementById('preview-img-wrap');
-    if (wrap) { wrap.style.transform = ''; }
+    prevImg._blobUrl  = imgUrl;
+    prevImg._fileName = 'catchment_map.png';
+    // Draw on canvas with watermark baked in once image loads
+    prevImg.onload = () => { _drawPreviewCanvas(); window._previewReset && window._previewReset(); };
+    prevImg.src = imgUrl;
     // Update title label in preview toolbar
     const titleEl = document.getElementById('preview-title-label');
     if (titleEl) titleEl.textContent = _lastExportParams.title || 'Catchment Map';
@@ -1440,27 +1429,55 @@ function exportResultsZip() {
   if (!_lastExportParams) { setStatus('Generate the preview first.', 'error'); return; }
   const btn = document.getElementById('preview-dl-btn');
   const orig = btn.textContent;
-  btn.textContent = 'Generating…'; btn.disabled = true;
+  btn.textContent = 'Building export…'; btn.disabled = true;
   fetch('/api/export_results', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(_lastExportParams),
   })
   .then(r => {
-    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Export failed'); });
+    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Export failed.'); });
     return r.blob();
   })
   .then(blob => {
-    const title = (_lastExportParams.title || 'catchment_results').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = (title || 'catchment_results') + '.zip';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-    setStatus('ZIP exported — contains map PNG + GeoJSON layers.', 'ok');
+    const title = (_lastExportParams.title || 'catchment_results').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+    a.href = url; a.download = title + '.zip'; a.click();
+    URL.revokeObjectURL(url);
+    setStatus('Export downloaded.', 'ok');
+    btn.textContent = orig; btn.disabled = false;
   })
-  .catch(e => setStatus('Export error: ' + e.message, 'error'))
-  .finally(() => { btn.textContent = orig; btn.disabled = false; });
+  .catch(e => { setStatus('Export error: ' + e.message, 'error'); btn.textContent = orig; btn.disabled = false; });
+}
+
+// ── Watermark baked into canvas ───────────────────────────────────────────────
+function _drawPreviewCanvas() {
+  const imgEl  = document.getElementById('preview-img');
+  const canvas = document.getElementById('preview-canvas');
+  if (!imgEl || !canvas || !imgEl.naturalWidth) return;
+  const W = imgEl.naturalWidth, H = imgEl.naturalHeight;
+  canvas.width  = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(imgEl, 0, 0);
+  // Diagonal PREVIEW watermark — baked into pixels so save-as includes it
+  ctx.save();
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(-35 * Math.PI / 180);
+  const fs = Math.max(56, Math.round(W * 0.09));
+  ctx.font         = `900 ${fs}px Arial, sans-serif`;
+  ctx.fillStyle    = 'rgba(20,80,200,0.32)';
+  ctx.shadowColor  = 'rgba(10,40,120,0.28)';
+  ctx.shadowBlur   = 14;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  // Spaced letters via individual drawText calls
+  const letters = 'PREVIEW'.split('');
+  const spacing = fs * 1.35;
+  const startX  = -((letters.length - 1) / 2) * spacing;
+  letters.forEach((ch, i) => ctx.fillText(ch, startX + i * spacing, 0));
+  ctx.restore();
 }
 
 // ── Preview pan + zoom viewer ─────────────────────────────────────────────────
@@ -1472,7 +1489,7 @@ function exportResultsZip() {
 
   const container = () => document.getElementById('preview-scroll');
   const wrap      = () => document.getElementById('preview-img-wrap');
-  const img       = () => document.getElementById('preview-img');
+  const canvas    = () => document.getElementById('preview-canvas'); // dimensions source
 
   function _apply() {
     const w = wrap();
@@ -1484,21 +1501,19 @@ function exportResultsZip() {
   }
 
   function _minScale() {
-    const c = container(), im = img();
-    if (!c || !im || !im.naturalWidth) return 0.1;
+    const c = container(), cv = canvas();
+    if (!c || !cv || !cv.width) return 0.1;
     const pad = 40;
     return Math.min(1,
-      (c.clientWidth  - pad) / im.naturalWidth,
-      (c.clientHeight - pad) / im.naturalHeight);
+      (c.clientWidth  - pad) / cv.width,
+      (c.clientHeight - pad) / cv.height);
   }
 
   function _clamp() {
-    const c = container(), im = img();
-    if (!c || !im) return;
-    const iw = im.naturalWidth * _s, ih = im.naturalHeight * _s;
-    const cw = c.clientWidth,        ch = c.clientHeight;
-    // When paper fits inside container → keep it centred
-    // When paper larger than container → clamp so edges don't go past boundary
+    const c = container(), cv = canvas();
+    if (!c || !cv || !cv.width) return;
+    const iw = cv.width  * _s, ih = cv.height * _s;
+    const cw = c.clientWidth,  ch = c.clientHeight;
     _ox = iw <= cw ? (cw - iw) / 2 : Math.max(cw - iw, Math.min(0, _ox));
     _oy = ih <= ch ? (ch - ih) / 2 : Math.max(ch - ih, Math.min(0, _oy));
   }
@@ -1506,13 +1521,14 @@ function exportResultsZip() {
   function _reset() {
     _minS = _minScale();
     _s    = _minS;
-    const c = container(), im = img();
-    if (c && im) {
-      _ox = (c.clientWidth  - im.naturalWidth  * _s) / 2;
-      _oy = (c.clientHeight - im.naturalHeight * _s) / 2;
+    const c = container(), cv = canvas();
+    if (c && cv && cv.width) {
+      _ox = (c.clientWidth  - cv.width  * _s) / 2;
+      _oy = (c.clientHeight - cv.height * _s) / 2;
     }
     _apply();
   }
+  window._previewReset = _reset; // called externally after canvas is drawn
 
   // Scroll wheel → zoom centred exactly on cursor
   document.addEventListener('wheel', e => {
@@ -1563,14 +1579,16 @@ function exportResultsZip() {
     if (e.button === 1 && container()?.contains(e.target)) e.preventDefault();
   });
 
-  // Reset when a new image loads (covers all paper/orientation changes)
-  const im = document.getElementById('preview-img');
-  if (im) im.addEventListener('load', _reset);
+  // _reset is triggered externally (by _drawPreviewCanvas callback), not on img load
 
   // Reset on panel resize (handles window resize or sidebar drag)
   new ResizeObserver(() => {
     if (document.getElementById('preview-panel')?.classList.contains('active')) _reset();
   }).observe(document.getElementById('preview-scroll') || document.body);
+
+  // Block right-click context menu so "Save Image As" is unavailable
+  const sc = document.getElementById('preview-scroll');
+  if (sc) sc.addEventListener('contextmenu', e => e.preventDefault());
 })();
 
 // ── Export ────────────────────────────────────────────────────────────────────
