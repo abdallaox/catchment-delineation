@@ -4101,6 +4101,19 @@ def v1_export_download(token):
     )
 
 
+# ── Docs ───────────────────────────────────────────────────────────────────────
+@app.route("/docs")
+@app.route("/docs/")
+def docs_index():
+    return render_template("docs.html")
+
+
+@app.route("/docs/api")
+def docs_api_redirect():
+    from flask import redirect
+    return redirect("/docs")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Catchment Delineation — SRTM GL1 (30 m) via OpenTopography")

@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Catchment Delineation API — Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+/* ── Reset & base ──────────────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth;font-size:15px}
+body{font-family:'Inter',sans-serif;color:#1a202c;background:#fff;display:flex;min-height:100vh}
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+#sidebar{
+  width:260px;min-width:260px;background:#0f1923;color:#c8d6e5;
+  position:sticky;top:0;height:100vh;overflow-y:auto;padding:0;
+  display:flex;flex-direction:column;flex-shrink:0;
+}
+.sidebar-header{
+  padding:24px 20px 16px;border-bottom:1px solid #1e2e3d;
+}
+.sidebar-header .logo{
+  font-size:13px;font-weight:700;color:#4fc3f7;letter-spacing:.5px;text-transform:uppercase;
+}
+.sidebar-header .tagline{font-size:11px;color:#607d8b;margin-top:3px}
+.sidebar-links{padding:8px 0 24px}
+.nav-group{padding:16px 20px 4px;font-size:10px;font-weight:700;color:#456;letter-spacing:1px;text-transform:uppercase}
+.nav-link{
+  display:block;padding:7px 20px;font-size:13px;color:#90a4b4;
+  text-decoration:none;border-left:3px solid transparent;transition:all .15s;
+}
+.nav-link:hover{color:#e2eaf2;background:rgba(255,255,255,.04)}
+.nav-link.active{color:#4fc3f7;border-left-color:#4fc3f7;background:rgba(79,195,247,.07)}
+.nav-link .badge{
+  float:right;font-size:9px;font-weight:700;padding:2px 5px;border-radius:3px;margin-top:1px;
+  font-family:'JetBrains Mono',monospace;
+}
+.badge-get{background:#1a3a5c;color:#4fc3f7}
+.badge-post{background:#1a3d2a;color:#4caf50}
+.badge-delete{background:#3d1a1a;color:#ef5350}
+
+/* ── Main ─────────────────────────────────────────────────────────────── */
+#main{flex:1;overflow-y:auto;padding:0 0 80px}
+
+/* ── Topbar ───────────────────────────────────────────────────────────── */
+.topbar{
+  background:#fff;border-bottom:1px solid #e8edf2;padding:14px 48px;
+  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;
+}
+.topbar-title{font-size:14px;font-weight:600;color:#1a202c}
+.topbar-right{display:flex;gap:10px;align-items:center}
+.btn-small{
+  font-size:12px;font-weight:600;padding:6px 14px;border-radius:6px;
+  text-decoration:none;cursor:pointer;border:none;transition:all .15s;
+}
+.btn-outline{background:#fff;color:#1a7acc;border:1.5px solid #1a7acc}
+.btn-outline:hover{background:#f0f8ff}
+.btn-solid{background:#1a7acc;color:#fff}
+.btn-solid:hover{background:#155f9e}
+
+/* ── Content sections ─────────────────────────────────────────────────── */
+.content{max-width:860px;margin:0 auto;padding:48px 48px 0}
+.section{padding:48px 0 0;border-top:1px solid #e8edf2;margin-top:48px}
+.section:first-child{border-top:none;margin-top:0}
+h1{font-size:28px;font-weight:700;color:#0d1b2a;margin-bottom:10px}
+h2{font-size:20px;font-weight:700;color:#0d1b2a;margin-bottom:16px}
+h3{font-size:15px;font-weight:700;color:#0d1b2a;margin-bottom:10px;margin-top:28px}
+p{line-height:1.7;color:#445;margin-bottom:12px}
+ul{margin:8px 0 12px 18px;color:#445;line-height:1.8}
+li{margin-bottom:3px}
+a{color:#1a7acc;text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ── Method badges ────────────────────────────────────────────────────── */
+.method{
+  display:inline-flex;align-items:center;gap:10px;
+  padding:10px 16px;border-radius:8px;margin-bottom:20px;background:#f7fafc;
+  border:1px solid #e2e8f0;
+}
+.method-verb{
+  font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;
+  padding:3px 8px;border-radius:4px;
+}
+.get .method-verb{background:#e3f2fd;color:#0277bd}
+.post .method-verb{background:#e8f5e9;color:#2e7d32}
+.delete .method-verb{background:#ffebee;color:#c62828}
+.method-path{font-family:'JetBrains Mono',monospace;font-size:13px;color:#2d3748;font-weight:500}
+
+/* ── Code blocks ──────────────────────────────────────────────────────── */
+.code-block{position:relative;margin:12px 0 20px;border-radius:8px;overflow:hidden}
+.code-block pre{margin:0;font-size:12.5px;line-height:1.65}
+.code-block .copy-btn{
+  position:absolute;top:8px;right:8px;background:rgba(255,255,255,.12);
+  color:#ccc;border:none;padding:4px 10px;border-radius:4px;
+  font-size:11px;cursor:pointer;font-family:'Inter',sans-serif;transition:all .15s;
+}
+.code-block .copy-btn:hover{background:rgba(255,255,255,.22);color:#fff}
+
+/* ── Tables ───────────────────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;margin:12px 0 20px;font-size:13px}
+th{background:#f0f4f8;padding:8px 12px;text-align:left;font-weight:600;color:#2d3748;border-bottom:2px solid #e2e8f0}
+td{padding:9px 12px;border-bottom:1px solid #edf2f7;color:#4a5568;vertical-align:top}
+tr:last-child td{border-bottom:none}
+td code,th code{font-family:'JetBrains Mono',monospace;font-size:11.5px;background:#edf2f7;padding:1px 5px;border-radius:3px;color:#2d3748}
+.req{color:#c62828;font-size:10px;font-weight:700;text-transform:uppercase}
+.opt{color:#718096;font-size:10px;font-weight:700;text-transform:uppercase}
+
+/* ── Callouts ─────────────────────────────────────────────────────────── */
+.callout{
+  padding:14px 18px;border-radius:8px;margin:14px 0;font-size:13px;line-height:1.6;
+  border-left:4px solid;
+}
+.callout-info{background:#e3f2fd;border-color:#1a7acc;color:#0d3a5e}
+.callout-warn{background:#fff8e1;border-color:#f59f00;color:#5a3e00}
+.callout-tip{background:#e8f5e9;border-color:#2e7d32;color:#1a3d1f}
+.callout strong{font-weight:700}
+
+/* ── Try-it panel ─────────────────────────────────────────────────────── */
+.try-it{background:#f7fafc;border:1px solid #e2e8f0;border-radius:10px;padding:20px 24px;margin:24px 0}
+.try-it h3{margin-top:0}
+.try-it input,.try-it select{
+  width:100%;padding:8px 10px;border:1px solid #cbd5e0;border-radius:6px;
+  font-family:'Inter',sans-serif;font-size:13px;margin-bottom:10px;background:#fff;
+}
+.try-it label{display:block;font-size:12px;font-weight:600;color:#2d3748;margin-bottom:4px}
+.try-it .try-row{display:flex;gap:10px}
+.try-it .try-row>div{flex:1}
+.btn-try{
+  background:#1a7acc;color:#fff;border:none;padding:8px 18px;
+  border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;
+}
+.btn-try:hover{background:#155f9e}
+.try-output{margin-top:14px}
+
+/* ── Raster cards ─────────────────────────────────────────────────────── */
+.raster-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin:16px 0}
+.raster-card{background:#f7fafc;border:1px solid #e2e8f0;border-radius:8px;padding:16px}
+.raster-card .rid{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#1a7acc}
+.raster-card .desc{font-size:12px;color:#718096;margin:6px 0}
+.raster-card .meta{font-size:11px;font-family:'JetBrains Mono',monospace;color:#4a5568}
+
+/* ── Footer ───────────────────────────────────────────────────────────── */
+.footer{text-align:center;padding:40px;font-size:12px;color:#a0aec0;border-top:1px solid #e8edf2;margin-top:60px}
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+@media(max-width:768px){
+  body{flex-direction:column}
+  #sidebar{width:100%;height:auto;position:relative}
+  .content{padding:24px 20px 0}
+  .topbar{padding:12px 20px}
+  .raster-grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════ SIDEBAR ══════════════════════════════ -->
+<nav id="sidebar">
+  <div class="sidebar-header">
+    <div class="logo">Catchment Delineation</div>
+    <div class="tagline">API Documentation v1</div>
+  </div>
+  <div class="sidebar-links">
+    <div class="nav-group">Getting Started</div>
+    <a class="nav-link active" href="#overview">Overview</a>
+    <a class="nav-link" href="#auth">Sessions &amp; Auth</a>
+    <a class="nav-link" href="#quickstart">Quickstart</a>
+    <a class="nav-link" href="#errors">Errors</a>
+
+    <div class="nav-group">Endpoints</div>
+    <a class="nav-link" href="#ep-session"><span class="badge badge-post">POST</span>Create Session</a>
+    <a class="nav-link" href="#ep-session-del"><span class="badge badge-delete">DEL</span>Delete Session</a>
+    <a class="nav-link" href="#ep-dem-fetch"><span class="badge badge-post">POST</span>DEM Fetch</a>
+    <a class="nav-link" href="#ep-dem-status"><span class="badge badge-get">GET</span>DEM Status</a>
+    <a class="nav-link" href="#ep-snap"><span class="badge badge-post">POST</span>Snap</a>
+    <a class="nav-link" href="#ep-delineate"><span class="badge badge-post">POST</span>Delineate</a>
+    <a class="nav-link" href="#ep-results"><span class="badge badge-get">GET</span>Results</a>
+    <a class="nav-link" href="#ep-clear"><span class="badge badge-post">POST</span>Clear</a>
+    <a class="nav-link" href="#ep-rivers"><span class="badge badge-post">POST</span>Rivers</a>
+
+    <div class="nav-group">Rasters</div>
+    <a class="nav-link" href="#ep-rasters-list"><span class="badge badge-get">GET</span>Rasters List</a>
+    <a class="nav-link" href="#ep-rasters-dl"><span class="badge badge-get">GET</span>Rasters Download</a>
+
+    <div class="nav-group">Outputs</div>
+    <a class="nav-link" href="#ep-report"><span class="badge badge-post">POST</span>Report</a>
+    <a class="nav-link" href="#ep-export"><span class="badge badge-post">POST</span>Export ZIP</a>
+    <a class="nav-link" href="#ep-export-dl"><span class="badge badge-get">GET</span>Download ZIP</a>
+
+    <div class="nav-group">Reference</div>
+    <a class="nav-link" href="#d8-codes">D8 Direction Codes</a>
+    <a class="nav-link" href="#raster-types">Raster Types</a>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════ MAIN ═════════════════════════════════ -->
+<div id="main">
+  <div class="topbar">
+    <span class="topbar-title">Catchment Delineation API</span>
+    <div class="topbar-right">
+      <a class="btn-small btn-outline" href="/">&#8592; App</a>
+      <a class="btn-small btn-outline" href="/api/v1" target="_blank">JSON Descriptor</a>
+      <a class="btn-small btn-solid" href="#quickstart">Quickstart</a>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- ── OVERVIEW ─────────────────────────────────────────────────────── -->
+    <div id="overview">
+      <h1>Catchment Delineation API</h1>
+      <p>A REST API for automated river catchment delineation using 30 m SRTM elevation data. Given a bounding box or polygon, it downloads the DEM, computes D8 flow routing, extracts stream networks, traces upstream catchment boundaries, and produces GeoJSON results, an HTML report, and a ZIP export.</p>
+
+      <div class="callout callout-info">
+        <strong>Base URL:</strong> All endpoints are relative to your deployment root, e.g.
+        <code>https://your-app.railway.app/api/v1/…</code>
+      </div>
+
+      <h3>Methodology</h3>
+      <ul>
+        <li><strong>DEM source:</strong> SRTM GL1 (~30 m) via OpenTopography API. Falls back to AWS Terrain Tiles if rate-limited.</li>
+        <li><strong>Flow routing:</strong> D8 algorithm — each cell drains to one of 8 neighbours. Implemented via pysheds with pit-filling and depression-filling.</li>
+        <li><strong>Stream extraction:</strong> Cells where flow accumulation ≥ <code>acc_threshold</code> are classified as streams.</li>
+        <li><strong>Catchment delineation:</strong> BFS upstream from the snapped outlet, clipped to the original study polygon.</li>
+        <li><strong>Strahler ordering:</strong> Applied at segment level to the river network graph.</li>
+      </ul>
+    </div>
+
+    <!-- ── AUTH / SESSIONS ──────────────────────────────────────────────── -->
+    <div id="auth" class="section">
+      <h2>Sessions &amp; Authentication</h2>
+      <p>There is <strong>no API key required</strong>. The API is open access.</p>
+      <p>All state (loaded DEM, results, rasters) is scoped to a <strong>session</strong>. Create a session first, then pass the <code>session_id</code> to every subsequent call in one of three ways:</p>
+
+      <table>
+        <tr><th>Method</th><th>Example</th></tr>
+        <tr><td>JSON body field</td><td><code>"session_id": "abc123"</code></td></tr>
+        <tr><td>Query parameter</td><td><code>?session_id=abc123</code></td></tr>
+        <tr><td>Request header</td><td><code>X-Session-Id: abc123</code></td></tr>
+      </table>
+
+      <div class="callout callout-warn">
+        <strong>Memory:</strong> Sessions are stored in-memory on the server. Always call <code>DELETE /api/v1/session/&lt;id&gt;</code> when done to free resources. Sessions are not persisted across server restarts.
+      </div>
+    </div>
+
+    <!-- ── QUICKSTART ────────────────────────────────────────────────────── -->
+    <div id="quickstart" class="section">
+      <h2>Quickstart</h2>
+      <p>Complete workflow from scratch to downloadable results:</p>
+
+      <h3>1 — Create a session</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -s -X POST https://your-app.railway.app/api/v1/session \
+  -H "Content-Type: application/json"
+# → {"session_id": "a3f9b2...", "created_at": "2025-01-01T00:00:00Z"}
+SID="a3f9b2..."</code></pre>
+      </div>
+
+      <h3>2 — Fetch DEM (by bounding box)</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -s -X POST https://your-app.railway.app/api/v1/dem/fetch \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"bbox\":{\"south\":51.80,\"north\":51.88,\"west\":-3.55,\"east\":-3.40}}"
+# → {"bounds":{...}, "res_m":30.9, "default_acc":150, "n_river_segments":582, ...}
+# Store default_acc — use it as acc_threshold in /delineate</code></pre>
+      </div>
+
+      <h3>3 — Delineate a catchment</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -s -X POST https://your-app.railway.app/api/v1/delineate \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"lat\":51.83,\"lon\":-3.47,\"acc_threshold\":150}"
+# → {"catchment":{GeoJSON}, "outlet":{GeoJSON}, "stats":{"area_km2":34.2,...}}</code></pre>
+      </div>
+
+      <h3>4 — Download intermediate rasters</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash"># List available rasters
+curl -s "https://your-app.railway.app/api/v1/rasters/list?session_id=$SID"
+
+# Download DEM GeoTIFF
+curl -s "https://your-app.railway.app/api/v1/rasters/download/dem?session_id=$SID" -o dem.tif
+
+# Download flow direction
+curl -s "https://your-app.railway.app/api/v1/rasters/download/flow_direction?session_id=$SID" -o fdir.tif
+
+# Download flow accumulation
+curl -s "https://your-app.railway.app/api/v1/rasters/download/flow_accumulation?session_id=$SID" -o acc.tif</code></pre>
+      </div>
+
+      <h3>5 — Generate HTML report</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -s -X POST https://your-app.railway.app/api/v1/report \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"title\":\"My Catchment\",\"author\":\"Agent\"}" \
+  | python -c "import sys,json; open('report.html','w').write(json.load(sys.stdin)['html'])"</code></pre>
+      </div>
+
+      <h3>6 — Export ZIP (map PNG + GeoJSON)</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">TOKEN=$(curl -s -X POST https://your-app.railway.app/api/v1/export \
+  -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"title\":\"My Catchment\"}" \
+  | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -s "https://your-app.railway.app/api/v1/export/download/$TOKEN" -o results.zip</code></pre>
+      </div>
+
+      <h3>7 — Cleanup</h3>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -s -X DELETE "https://your-app.railway.app/api/v1/session/$SID"
+# → {"ok": true}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── ERRORS ────────────────────────────────────────────────────────── -->
+    <div id="errors" class="section">
+      <h2>Error Format</h2>
+      <p>All errors return an appropriate HTTP status code with a JSON body. No HTML error pages.</p>
+      <div class="code-block">
+        <button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{"error": "No DEM loaded. Call /api/v1/dem/fetch first."}
+
+// 500 errors also include a traceback:
+{"error": "...", "trace": "Traceback (most recent call last):\n..."}</code></pre>
+      </div>
+      <table>
+        <tr><th>Code</th><th>Meaning</th></tr>
+        <tr><td><code>400</code></td><td>Missing or invalid parameters</td></tr>
+        <tr><td><code>404</code></td><td>Unknown session, raster_id, or token</td></tr>
+        <tr><td><code>500</code></td><td>Server-side processing error (includes trace)</td></tr>
+      </table>
+    </div>
+
+    <!-- ══════════════════════════ ENDPOINTS ══════════════════════════════ -->
+
+    <!-- ── POST /session ─────────────────────────────────────────────────── -->
+    <div id="ep-session" class="section">
+      <h2>Create Session</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/session</span>
+      </div>
+      <p>Create a new isolated analysis session. Must be called before any other endpoint. Returns a <code>session_id</code> to pass to all subsequent requests.</p>
+
+      <h3>Request body</h3>
+      <p>Empty — no fields required.</p>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td>Unique session identifier — pass to all subsequent calls</td></tr>
+        <tr><td><code>created_at</code></td><td>string</td><td>ISO-8601 UTC creation timestamp</td></tr>
+      </table>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -X POST https://your-app.railway.app/api/v1/session</code></pre>
+      </div>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{"session_id": "a3f9b2c1d4e5f6...", "created_at": "2025-01-01T12:00:00Z"}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── DELETE /session ───────────────────────────────────────────────── -->
+    <div id="ep-session-del" class="section">
+      <h2>Delete Session</h2>
+      <div class="method delete">
+        <span class="method-verb">DELETE</span>
+        <span class="method-path">/api/v1/session/&lt;session_id&gt;</span>
+      </div>
+      <p>Free a session and all its associated data from server memory — DEM arrays, computed rasters, and delineation results. Always call this when you're done to avoid memory leaks.</p>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -X DELETE https://your-app.railway.app/api/v1/session/a3f9b2c1d4e5f6</code></pre>
+      </div>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{"ok": true}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── POST /dem/fetch ───────────────────────────────────────────────── -->
+    <div id="ep-dem-fetch" class="section">
+      <h2>DEM Fetch</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/dem/fetch</span>
+      </div>
+      <p>Download and process a DEM for a study area. This is the first step after creating a session. It downloads 30 m SRTM data, conditions it (pit-filling, depression-filling, flat resolution), computes D8 flow direction and accumulation, extracts the river network, and caches all intermediate rasters in memory.</p>
+      <div class="callout callout-warn">
+        <strong>Synchronous &amp; slow:</strong> This call blocks for 30–120 seconds depending on area size. For areas larger than ~1° × 1°, expect longer times.
+      </div>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td>Session identifier</td></tr>
+        <tr><td><code>bbox</code></td><td>object</td><td><span class="req">one of</span></td><td><code>{south, north, west, east}</code> in decimal degrees WGS84</td></tr>
+        <tr><td><code>polygon</code></td><td>object</td><td><span class="req">one of</span></td><td>GeoJSON Polygon geometry (<code>type</code> + <code>coordinates</code>)</td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>bounds</code></td><td>object</td><td>Actual DEM extent <code>{south,north,west,east}</code></td></tr>
+        <tr><td><code>res_m</code></td><td>number</td><td>DEM cell size in metres</td></tr>
+        <tr><td><code>shape</code></td><td>array</td><td><code>[rows, cols]</code></td></tr>
+        <tr><td><code>acc_p95</code></td><td>number</td><td>95th-percentile flow accumulation value</td></tr>
+        <tr><td><code>default_acc</code></td><td>integer</td><td><strong>Use as <code>acc_threshold</code></strong> in /delineate and /rivers</td></tr>
+        <tr><td><code>n_river_segments</code></td><td>integer</td><td>Number of river segments at default threshold</td></tr>
+        <tr><td><code>dem_source</code></td><td>string</td><td>Data source label</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash"># Using bbox
+curl -X POST https://your-app.railway.app/api/v1/dem/fetch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "a3f9b2...",
+    "bbox": {"south": 51.80, "north": 51.88, "west": -3.55, "east": -3.40}
+  }'</code></pre>
+      </div>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{
+  "bounds":           {"south": 51.80, "north": 51.88, "west": -3.55, "east": -3.40},
+  "res_m":            30.9,
+  "shape":            [288, 540],
+  "acc_p95":          130.0,
+  "default_acc":      150,
+  "n_river_segments": 582,
+  "dem_source":       "OpenTopography SRTM GL1 (30 m)"
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── GET /dem/status ───────────────────────────────────────────────── -->
+    <div id="ep-dem-status" class="section">
+      <h2>DEM Status</h2>
+      <div class="method get">
+        <span class="method-verb">GET</span>
+        <span class="method-path">/api/v1/dem/status?session_id=…</span>
+      </div>
+      <p>Poll DEM processing progress. Since <code>/dem/fetch</code> is synchronous this is only needed if you call it from a background thread. Returns a progress snapshot updated in real-time.</p>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>stage</code></td><td>string</td><td>Current processing step label</td></tr>
+        <tr><td><code>pct</code></td><td>integer</td><td>Progress 0–100</td></tr>
+        <tr><td><code>done</code></td><td>boolean</td><td><code>true</code> when processing is complete</td></tr>
+        <tr><td><code>error</code></td><td>string|null</td><td>Error message if failed</td></tr>
+        <tr><td><code>source</code></td><td>string</td><td>DEM data source being used</td></tr>
+      </table>
+    </div>
+
+    <!-- ── POST /snap ────────────────────────────────────────────────────── -->
+    <div id="ep-snap" class="section">
+      <h2>Snap to Stream</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/snap</span>
+      </div>
+      <p>Snap a lat/lon point to the nearest stream cell within a search radius. <code>/delineate</code> does this automatically, so calling snap first is optional — useful for previewing the outlet location before delineating.</p>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+        <tr><td><code>lat</code></td><td>number</td><td><span class="req">required</span></td><td>Latitude in decimal degrees</td></tr>
+        <tr><td><code>lon</code></td><td>number</td><td><span class="req">required</span></td><td>Longitude in decimal degrees</td></tr>
+        <tr><td><code>acc_threshold</code></td><td>integer</td><td><span class="opt">optional</span></td><td>Stream definition threshold (default 500; use <code>default_acc</code> from /dem/fetch)</td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>lat</code></td><td>number</td><td>Snapped latitude</td></tr>
+        <tr><td><code>lon</code></td><td>number</td><td>Snapped longitude</td></tr>
+        <tr><td><code>snapped</code></td><td>boolean</td><td><code>true</code> if point was moved to a stream cell</td></tr>
+        <tr><td><code>acc</code></td><td>integer</td><td>Flow accumulation at snapped cell (upstream cell count)</td></tr>
+      </table>
+    </div>
+
+    <!-- ── POST /delineate ───────────────────────────────────────────────── -->
+    <div id="ep-delineate" class="section">
+      <h2>Delineate</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/delineate</span>
+      </div>
+      <p>Delineate the upstream catchment for one outlet point. Automatically snaps the point to the nearest stream cell. Call multiple times to accumulate results for multi-outlet analysis — all accumulated results are used together by <code>/report</code> and <code>/export</code>.</p>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+        <tr><td><code>lat</code></td><td>number</td><td><span class="req">required</span></td><td>Outlet latitude (decimal degrees)</td></tr>
+        <tr><td><code>lon</code></td><td>number</td><td><span class="req">required</span></td><td>Outlet longitude (decimal degrees)</td></tr>
+        <tr><td><code>acc_threshold</code></td><td>integer</td><td><span class="opt">optional</span></td><td>Stream threshold in cells (default 500; use <code>default_acc</code> from /dem/fetch)</td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>catchment</code></td><td>GeoJSON FC</td><td>Catchment boundary polygon. Properties: <code>{cells, area_km2}</code></td></tr>
+        <tr><td><code>outlet</code></td><td>GeoJSON FC</td><td>Snapped outlet point. Properties: <code>{acc}</code></td></tr>
+        <tr><td><code>stats.area_km2</code></td><td>number</td><td>Catchment area in km²</td></tr>
+        <tr><td><code>stats.max_strahler</code></td><td>integer</td><td>Highest Strahler stream order within catchment</td></tr>
+        <tr><td><code>stats.outlet_lat/lon</code></td><td>number</td><td>Snapped outlet coordinates</td></tr>
+        <tr><td><code>stats.snapped</code></td><td>boolean</td><td>Whether outlet was moved to nearest stream</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -X POST https://your-app.railway.app/api/v1/delineate \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"a3f9b2...","lat":51.83,"lon":-3.47,"acc_threshold":150}'</code></pre>
+      </div>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{
+  "catchment": {"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[...]]},"properties":{"cells":321,"area_km2":0.31}}]},
+  "outlet":    {"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[-3.470556,51.828611]},"properties":{"acc":321}}]},
+  "stats": {
+    "area_km2":321,"catchment_cells":321,"max_strahler":1,
+    "outlet_lat":51.828611,"outlet_lon":-3.470556,
+    "snapped":true,"acc_threshold":150,"dem_res_m":30.9
+  }
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── GET /results ──────────────────────────────────────────────────── -->
+    <div id="ep-results" class="section">
+      <h2>List Results</h2>
+      <div class="method get">
+        <span class="method-verb">GET</span>
+        <span class="method-path">/api/v1/results?session_id=…</span>
+      </div>
+      <p>List all catchments delineated so far in this session. Each entry contains the same fields returned by <code>/delineate</code>.</p>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>count</code></td><td>integer</td><td>Number of delineated catchments</td></tr>
+        <tr><td><code>results</code></td><td>array</td><td>Each item: <code>{index, stats, catchment:GeoJSON, outlet:GeoJSON}</code></td></tr>
+      </table>
+    </div>
+
+    <!-- ── POST /clear ───────────────────────────────────────────────────── -->
+    <div id="ep-clear" class="section">
+      <h2>Clear Results</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/clear</span>
+      </div>
+      <p>Clear all delineation results but keep the DEM loaded. Useful to start a new set of outlets without re-downloading the DEM.</p>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+      </table>
+    </div>
+
+    <!-- ── POST /rivers ──────────────────────────────────────────────────── -->
+    <div id="ep-rivers" class="section">
+      <h2>Rivers</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/rivers</span>
+      </div>
+      <p>Extract the river network as a GeoJSON FeatureCollection. Each feature is a LineString segment with Strahler order and flow accumulation in its properties.</p>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+        <tr><td><code>acc_threshold</code></td><td>integer</td><td><span class="opt">optional</span></td><td>Minimum accumulation to qualify as a stream (default 500). Lower = more streams.</td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>rivers</code></td><td>GeoJSON FC</td><td>LineStrings. Properties per feature: <code>{order:int, acc:int}</code></td></tr>
+        <tr><td><code>n_segments</code></td><td>integer</td><td>Number of segments returned</td></tr>
+      </table>
+    </div>
+
+    <!-- ══════════════════════════ RASTERS ══════════════════════════════ -->
+
+    <!-- ── GET /rasters/list ─────────────────────────────────────────────── -->
+    <div id="ep-rasters-list" class="section">
+      <h2>Rasters List</h2>
+      <div class="method get">
+        <span class="method-verb">GET</span>
+        <span class="method-path">/api/v1/rasters/list?session_id=…</span>
+      </div>
+      <p>Return a manifest of the three intermediate hydrology rasters available for this session after <code>/dem/fetch</code> completes. Each entry includes metadata and a ready-to-use <code>download_url</code>.</p>
+
+      <div class="raster-grid">
+        <div class="raster-card">
+          <div class="rid">dem</div>
+          <div class="desc">Elevation in metres above sea level</div>
+          <div class="meta">dtype: float32<br/>nodata: -9999<br/>source: SRTM GL1 / AWS</div>
+        </div>
+        <div class="raster-card">
+          <div class="rid">flow_direction</div>
+          <div class="desc">D8 flow direction codes (see reference)</div>
+          <div class="meta">dtype: int16<br/>nodata: 0 (outside area)<br/>codes: 1,2,4,8,16,32,64,128</div>
+        </div>
+        <div class="raster-card">
+          <div class="rid">flow_accumulation</div>
+          <div class="desc">Upstream cell count — higher = larger drainage area</div>
+          <div class="meta">dtype: float32<br/>nodata: -1<br/>use as stream threshold</div>
+        </div>
+      </div>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td></td></tr>
+        <tr><td><code>rasters[].id</code></td><td>string</td><td>Raster identifier for /download</td></tr>
+        <tr><td><code>rasters[].filename</code></td><td>string</td><td>Suggested save filename</td></tr>
+        <tr><td><code>rasters[].dtype</code></td><td>string</td><td>NumPy dtype</td></tr>
+        <tr><td><code>rasters[].nodata</code></td><td>number</td><td>NoData sentinel value</td></tr>
+        <tr><td><code>rasters[].crs</code></td><td>string</td><td>e.g. <code>EPSG:4326</code></td></tr>
+        <tr><td><code>rasters[].shape</code></td><td>array</td><td><code>[rows, cols]</code></td></tr>
+        <tr><td><code>rasters[].bounds</code></td><td>object</td><td><code>{south,north,west,east}</code></td></tr>
+        <tr><td><code>rasters[].size_bytes</code></td><td>integer</td><td>Compressed GeoTIFF size</td></tr>
+        <tr><td><code>rasters[].download_url</code></td><td>string</td><td>Direct GET URL (includes session_id)</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl "https://your-app.railway.app/api/v1/rasters/list?session_id=a3f9b2..."</code></pre>
+      </div>
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-json">{
+  "session_id": "a3f9b2...",
+  "rasters": [
+    {
+      "id": "dem", "filename": "dem.tif", "mime": "image/tiff",
+      "dtype": "float32", "nodata": -9999.0,
+      "description": "Digital Elevation Model — elevation in metres above sea level.",
+      "crs": "EPSG:4326", "shape": [288, 540],
+      "bounds": {"south":51.80,"north":51.88,"west":-3.55,"east":-3.40},
+      "size_bytes": 184320,
+      "download_url": "https://your-app.railway.app/api/v1/rasters/download/dem?session_id=a3f9b2..."
+    },
+    {"id": "flow_direction", ...},
+    {"id": "flow_accumulation", ...}
+  ]
+}</code></pre>
+      </div>
+    </div>
+
+    <!-- ── GET /rasters/download ──────────────────────────────────────────── -->
+    <div id="ep-rasters-dl" class="section">
+      <h2>Rasters Download</h2>
+      <div class="method get">
+        <span class="method-verb">GET</span>
+        <span class="method-path">/api/v1/rasters/download/&lt;raster_id&gt;?session_id=…</span>
+      </div>
+      <p>Stream a georeferenced GeoTIFF (LZW-compressed, WGS84/EPSG:4326). Rasters are pre-built at <code>/dem/fetch</code> time — downloads are instant, no recomputation.</p>
+
+      <div class="callout callout-tip">
+        <strong>Tip:</strong> Open directly in QGIS, rasterio, or GDAL. The affine transform and CRS are embedded in the file.
+      </div>
+
+      <table>
+        <tr><th>raster_id</th><th>dtype</th><th>nodata</th><th>Description</th></tr>
+        <tr><td><code>dem</code></td><td>float32</td><td>-9999</td><td>Elevation in metres</td></tr>
+        <tr><td><code>flow_direction</code></td><td>int16</td><td>0</td><td>D8 direction codes (see reference)</td></tr>
+        <tr><td><code>flow_accumulation</code></td><td>float32</td><td>-1</td><td>Upstream cell count</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash"># Download all three rasters
+for RID in dem flow_direction flow_accumulation; do
+  curl -s "https://your-app.railway.app/api/v1/rasters/download/$RID?session_id=a3f9b2..." \
+    -o "${RID}.tif"
+done
+
+# Verify with rasterio (Python)
+import rasterio
+with rasterio.open("dem.tif") as ds:
+    print(ds.crs, ds.dtypes, ds.bounds)</code></pre>
+      </div>
+    </div>
+
+    <!-- ══════════════════════════ OUTPUTS ══════════════════════════════ -->
+
+    <!-- ── POST /report ──────────────────────────────────────────────────── -->
+    <div id="ep-report" class="section">
+      <h2>Report</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/report</span>
+      </div>
+      <p>Generate a full catchment analysis HTML report. The returned <code>html</code> string is a completely self-contained document (inline CSS, base64 images) — save it directly as a <code>.html</code> file and open in any browser.</p>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+        <tr><td><code>title</code></td><td>string</td><td><span class="opt">optional</span></td><td>Report title (default "Catchment Analysis Report")</td></tr>
+        <tr><td><code>author</code></td><td>string</td><td><span class="opt">optional</span></td><td>Author name shown on report</td></tr>
+        <tr><td><code>acc_threshold</code></td><td>integer</td><td><span class="opt">optional</span></td><td>River threshold for map (default: value from last /delineate call)</td></tr>
+        <tr><td><code>outlets</code></td><td>array</td><td><span class="opt">optional</span></td><td><code>[{id:int, name:str, color:str}]</code> — label each catchment. <code>id</code> is 1-based index.</td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>html</code></td><td>string</td><td>Full self-contained HTML document</td></tr>
+        <tr><td><code>filename</code></td><td>string</td><td>Suggested save filename</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">curl -X POST https://your-app.railway.app/api/v1/report \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "a3f9b2...",
+    "title":  "Wye Catchment Study",
+    "author": "GIS Agent",
+    "outlets": [{"id":1,"name":"Main Outlet","color":"#3399ff"}]
+  }' | python -c "import sys,json; open('report.html','w').write(json.load(sys.stdin)['html'])"</code></pre>
+      </div>
+    </div>
+
+    <!-- ── POST /export ───────────────────────────────────────────────────── -->
+    <div id="ep-export" class="section">
+      <h2>Export ZIP</h2>
+      <div class="method post">
+        <span class="method-verb">POST</span>
+        <span class="method-path">/api/v1/export</span>
+      </div>
+      <p>Build a ZIP containing a print-quality map PNG and all GeoJSON layers. Returns a single-use download token — GET the <code>download_url</code> once to retrieve the file.</p>
+
+      <div class="callout callout-warn">
+        <strong>Single-use token:</strong> The download token is consumed on first use. Call <code>/api/v1/export</code> again to get a new one.
+      </div>
+
+      <h3>ZIP contents</h3>
+      <ul>
+        <li><code>catchment_map.png</code> — print-quality map with basemap, hillshade, rivers, and outlets</li>
+        <li><code>catchments.geojson</code> — catchment boundary polygons</li>
+        <li><code>outlets.geojson</code> — snapped outlet points</li>
+        <li><code>rivers.geojson</code> — full river network</li>
+      </ul>
+
+      <h3>Request body</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Description</th></tr>
+        <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td></td></tr>
+        <tr><td><code>title</code></td><td>string</td><td><span class="opt">optional</span></td><td>Map title and ZIP filename stem</td></tr>
+        <tr><td><code>acc_threshold</code></td><td>integer</td><td><span class="opt">optional</span></td><td>River threshold for map</td></tr>
+        <tr><td><code>paper</code></td><td>string</td><td><span class="opt">optional</span></td><td><code>"A4"</code> | <code>"A3"</code> | <code>"Letter"</code> (default "A4")</td></tr>
+        <tr><td><code>orientation</code></td><td>string</td><td><span class="opt">optional</span></td><td><code>"landscape"</code> | <code>"portrait"</code> (default "landscape")</td></tr>
+        <tr><td><code>outlets</code></td><td>array</td><td><span class="opt">optional</span></td><td><code>[{id, name, color}]</code></td></tr>
+      </table>
+
+      <h3>Response</h3>
+      <table>
+        <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        <tr><td><code>token</code></td><td>string</td><td>Single-use download token</td></tr>
+        <tr><td><code>filename</code></td><td>string</td><td>Suggested ZIP filename</td></tr>
+        <tr><td><code>download_url</code></td><td>string</td><td>Full URL — GET this once to download</td></tr>
+      </table>
+
+      <div class="code-block"><button class="copy-btn">Copy</button>
+        <pre><code class="language-bash">TOKEN=$(curl -s -X POST https://your-app.railway.app/api/v1/export \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"a3f9b2...","title":"My Catchment"}' \
+  | python -c "import sys,json; print(json.load(sys.stdin)['token'])")
+
+curl -s "https://your-app.railway.app/api/v1/export/download/$TOKEN" -o results.zip</code></pre>
+      </div>
+    </div>
+
+    <!-- ── GET /export/download ───────────────────────────────────────────── -->
+    <div id="ep-export-dl" class="section">
+      <h2>Download ZIP</h2>
+      <div class="method get">
+        <span class="method-verb">GET</span>
+        <span class="method-path">/api/v1/export/download/&lt;token&gt;</span>
+      </div>
+      <p>Download the pre-built export ZIP using the token returned by <code>/api/v1/export</code>. The token is consumed on first use — returns 404 if already used or expired.</p>
+    </div>
+
+    <!-- ══════════════════════════ REFERENCE ═════════════════════════════ -->
+
+    <!-- ── D8 codes ───────────────────────────────────────────────────────── -->
+    <div id="d8-codes" class="section">
+      <h2>D8 Flow Direction Codes</h2>
+      <p>The <code>flow_direction</code> raster encodes each cell's drainage direction as an integer. The encoding matches the standard ArcGIS / TauDEM D8 convention:</p>
+      <table>
+        <tr><th>Value</th><th>Direction</th><th>Description</th></tr>
+        <tr><td><code>64</code></td><td>N</td><td>North (up)</td></tr>
+        <tr><td><code>128</code></td><td>NE</td><td>Northeast</td></tr>
+        <tr><td><code>1</code></td><td>E</td><td>East (right)</td></tr>
+        <tr><td><code>2</code></td><td>SE</td><td>Southeast</td></tr>
+        <tr><td><code>4</code></td><td>S</td><td>South (down)</td></tr>
+        <tr><td><code>8</code></td><td>SW</td><td>Southwest</td></tr>
+        <tr><td><code>16</code></td><td>W</td><td>West (left)</td></tr>
+        <tr><td><code>32</code></td><td>NW</td><td>Northwest</td></tr>
+        <tr><td><code>0</code></td><td>—</td><td>NoData / outside study area</td></tr>
+      </table>
+    </div>
+
+    <!-- ── Raster types ───────────────────────────────────────────────────── -->
+    <div id="raster-types" class="section">
+      <h2>Raster Types Reference</h2>
+      <table>
+        <tr><th>ID</th><th>dtype</th><th>nodata</th><th>Unit</th><th>Notes</th></tr>
+        <tr><td><code>dem</code></td><td>float32</td><td>-9999</td><td>metres</td><td>Elevation above sea level. NaN cells (outside polygon) written as -9999.</td></tr>
+        <tr><td><code>flow_direction</code></td><td>int16</td><td>0</td><td>D8 code</td><td>See D8 table above. Cells outside polygon are 0.</td></tr>
+        <tr><td><code>flow_accumulation</code></td><td>float32</td><td>-1</td><td>cells</td><td>Number of upstream DEM cells. High values = main channels. Use as stream threshold.</td></tr>
+      </table>
+      <p>All rasters share the same affine transform, CRS (WGS84 / EPSG:4326), and grid dimensions. They can be overlaid directly in QGIS or processed together with rasterio / GDAL.</p>
+    </div>
+
+    <!-- ── Try it ─────────────────────────────────────────────────────────── -->
+    <div id="try-it" class="section">
+      <h2>Try It — curl Generator</h2>
+      <p>Fill in the fields below to generate ready-to-run curl commands.</p>
+
+      <div class="try-it">
+        <h3>Step 1 — Create Session</h3>
+        <label>Base URL</label>
+        <input id="ti-base" type="text" value="http://localhost:5000" placeholder="https://your-app.railway.app"/>
+        <button class="btn-try" onclick="generateSession()">Generate</button>
+        <div class="try-output">
+          <div class="code-block" id="out-session" style="display:none">
+            <button class="copy-btn">Copy</button>
+            <pre><code class="language-bash" id="out-session-code"></code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="try-it">
+        <h3>Step 2 — Fetch DEM by Bbox</h3>
+        <label>Session ID</label>
+        <input id="ti-sid" type="text" placeholder="paste session_id here"/>
+        <div class="try-row">
+          <div><label>South</label><input id="ti-south" type="number" step="0.01" value="51.80"/></div>
+          <div><label>North</label><input id="ti-north" type="number" step="0.01" value="51.88"/></div>
+          <div><label>West</label><input id="ti-west" type="number" step="0.01" value="-3.55"/></div>
+          <div><label>East</label><input id="ti-east" type="number" step="0.01" value="-3.40"/></div>
+        </div>
+        <button class="btn-try" onclick="generateDem()">Generate</button>
+        <div class="try-output">
+          <div class="code-block" id="out-dem" style="display:none">
+            <button class="copy-btn">Copy</button>
+            <pre><code class="language-bash" id="out-dem-code"></code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="try-it">
+        <h3>Step 3 — Delineate</h3>
+        <label>Session ID</label>
+        <input id="ti-sid2" type="text" placeholder="paste session_id here"/>
+        <div class="try-row">
+          <div><label>Lat</label><input id="ti-lat" type="number" step="0.001" value="51.83"/></div>
+          <div><label>Lon</label><input id="ti-lon" type="number" step="0.001" value="-3.47"/></div>
+          <div><label>acc_threshold</label><input id="ti-acc" type="number" value="150"/></div>
+        </div>
+        <button class="btn-try" onclick="generateDelineate()">Generate</button>
+        <div class="try-output">
+          <div class="code-block" id="out-delin" style="display:none">
+            <button class="copy-btn">Copy</button>
+            <pre><code class="language-bash" id="out-delin-code"></code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="try-it">
+        <h3>Download Rasters</h3>
+        <label>Session ID</label>
+        <input id="ti-sid3" type="text" placeholder="paste session_id here"/>
+        <button class="btn-try" onclick="generateRasters()">Generate</button>
+        <div class="try-output">
+          <div class="code-block" id="out-rasters" style="display:none">
+            <button class="copy-btn">Copy</button>
+            <pre><code class="language-bash" id="out-rasters-code"></code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Catchment Delineation API — Built with Flask + pysheds + rasterio &nbsp;·&nbsp;
+      <a href="/api/v1" target="_blank">JSON Descriptor</a> &nbsp;·&nbsp;
+      <a href="/">Web App</a>
+    </div>
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script>
+hljs.highlightAll();
+
+// ── Copy buttons ───────────────────────────────────────────────────────────
+document.addEventListener('click', e => {
+  if (!e.target.classList.contains('copy-btn')) return;
+  const code = e.target.nextElementSibling?.querySelector('code')?.innerText || '';
+  navigator.clipboard.writeText(code).then(() => {
+    const orig = e.target.textContent;
+    e.target.textContent = 'Copied!';
+    setTimeout(() => e.target.textContent = orig, 1500);
+  });
+});
+
+// ── Active sidebar link on scroll ─────────────────────────────────────────
+const sections = document.querySelectorAll('[id]');
+const navLinks  = document.querySelectorAll('.nav-link');
+const observer  = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navLinks.forEach(l => l.classList.remove('active'));
+      const active = document.querySelector(`.nav-link[href="#${e.target.id}"]`);
+      if (active) active.classList.add('active');
+    }
+  });
+}, {threshold: 0.3});
+sections.forEach(s => observer.observe(s));
+
+// ── Try-it generators ─────────────────────────────────────────────────────
+function base() { return document.getElementById('ti-base').value.replace(/\/$/, ''); }
+
+function show(id, code) {
+  const block = document.getElementById(id);
+  const codeEl = document.getElementById(id + '-code');
+  block.style.display = 'block';
+  codeEl.textContent = code;
+  hljs.highlightElement(codeEl);
+}
+
+function generateSession() {
+  show('out-session',
+    `curl -s -X POST ${base()}/api/v1/session \\\n  -H "Content-Type: application/json"`);
+}
+
+function generateDem() {
+  const sid = document.getElementById('ti-sid').value || 'YOUR_SESSION_ID';
+  const s = document.getElementById('ti-south').value;
+  const n = document.getElementById('ti-north').value;
+  const w = document.getElementById('ti-west').value;
+  const e = document.getElementById('ti-east').value;
+  show('out-dem',
+    `curl -s -X POST ${base()}/api/v1/dem/fetch \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -d '{"session_id":"${sid}","bbox":{"south":${s},"north":${n},"west":${w},"east":${e}}}'`);
+}
+
+function generateDelineate() {
+  const sid = document.getElementById('ti-sid2').value || 'YOUR_SESSION_ID';
+  const lat = document.getElementById('ti-lat').value;
+  const lon = document.getElementById('ti-lon').value;
+  const acc = document.getElementById('ti-acc').value;
+  show('out-delin',
+    `curl -s -X POST ${base()}/api/v1/delineate \\\n` +
+    `  -H "Content-Type: application/json" \\\n` +
+    `  -d '{"session_id":"${sid}","lat":${lat},"lon":${lon},"acc_threshold":${acc}}'`);
+}
+
+function generateRasters() {
+  const sid = document.getElementById('ti-sid3').value || 'YOUR_SESSION_ID';
+  show('out-rasters',
+    `# List rasters\ncurl -s "${base()}/api/v1/rasters/list?session_id=${sid}"\n\n` +
+    `# Download all three GeoTIFFs\n` +
+    `for RID in dem flow_direction flow_accumulation; do\n` +
+    `  curl -s "${base()}/api/v1/rasters/download/$RID?session_id=${sid}" -o "$RID.tif"\ndone`);
+}
+</script>
+</body>
+</html>
