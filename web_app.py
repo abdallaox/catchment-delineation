@@ -136,6 +136,72 @@ def _v1_sid(data=None):
         return sid
     return request.headers.get("X-Session-Id")
 
+
+def _raster_to_bytes(arr, dtype, nodata):
+    """Serialize a 2-D numpy array to LZW-compressed GeoTIFF bytes using session cache CRS/affine."""
+    from rasterio.io import MemoryFile
+    affine   = _cache["affine"]
+    crs      = _cache["crs"]
+    nrows, ncols = arr.shape
+    with MemoryFile() as mf:
+        with mf.open(
+            driver="GTiff", height=nrows, width=ncols,
+            count=1, dtype=dtype,
+            crs=crs, transform=affine,
+            nodata=nodata, compress="lzw",
+        ) as ds:
+            ds.write(arr.astype(dtype), 1)
+        return mf.read()
+
+
+def _cache_session_rasters(sess):
+    """Build GeoTIFF bytes for DEM, flow direction, and flow accumulation and
+    store them in sess['rasters'].  Called once at the end of /api/v1/dem/fetch
+    so downloads are zero-recompute — just stream the cached bytes."""
+    dem_arr  = _cache["dem_arr"].copy()
+    dem_arr[~np.isfinite(dem_arr)] = -9999.0
+    acc_arr  = _cache["acc_arr"].copy()
+    fdir_arr = _cache["fdir_arr"].copy().astype(np.int16)
+    wb       = _cache["bounds_wgs"]
+    crs_str  = _cache["crs"].to_string() if _cache.get("crs") else "EPSG:4326"
+    nrows, ncols = _cache["shape"]
+
+    sess["rasters"] = {
+        "dem": {
+            "bytes":       _raster_to_bytes(dem_arr,  "float32", -9999.0),
+            "dtype":       "float32",
+            "nodata":      -9999.0,
+            "filename":    "dem.tif",
+            "description": "Digital Elevation Model — elevation in metres above sea level.",
+        },
+        "flow_direction": {
+            "bytes":       _raster_to_bytes(fdir_arr, "int16",   0),
+            "dtype":       "int16",
+            "nodata":      0,
+            "filename":    "flow_direction.tif",
+            "description": (
+                "D8 flow direction. Each cell value encodes the cardinal direction "
+                "water drains to: 64=N, 128=NE, 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW. "
+                "0 = no-data / outside study area."
+            ),
+        },
+        "flow_accumulation": {
+            "bytes":       _raster_to_bytes(acc_arr,  "float32", -1.0),
+            "dtype":       "float32",
+            "nodata":      -1.0,
+            "filename":    "flow_accumulation.tif",
+            "description": (
+                "D8 flow accumulation — number of upstream DEM cells draining into each cell. "
+                "High values indicate main channels; use as a stream threshold."
+            ),
+        },
+    }
+    sess["rasters_meta"] = {
+        "crs":    crs_str,
+        "shape":  [nrows, ncols],
+        "bounds": {"south": wb[1], "west": wb[0], "north": wb[3], "east": wb[2]},
+    }
+
 # ── Naturalearth countries cache (downloaded once per process) ─────────────────
 _NE_COUNTRIES_CACHE = os.path.join(os.path.dirname(__file__), "data", "ne_110m_countries.geojson")
 _NE_COUNTRIES_URL   = ("https://raw.githubusercontent.com/nvkelso/natural-earth-vector"
@@ -3515,6 +3581,39 @@ def v1_index():
                 "description": "Download the pre-built export ZIP. Single-use — token is deleted after download.",
                 "response": "application/zip binary stream",
             },
+            "GET /api/v1/rasters/list": {
+                "description": (
+                    "Return a manifest of the three intermediate hydrology rasters available "
+                    "for this session after /dem/fetch completes. "
+                    "Each entry includes metadata and a ready-to-use download_url."
+                ),
+                "query_params": {"session_id": "string REQUIRED"},
+                "response": {
+                    "session_id": "string",
+                    "rasters": "array — one entry per raster, each with: "
+                               "{id, filename, mime, dtype, nodata, description, "
+                               "crs, shape:[rows,cols], bounds:{south,north,west,east}, "
+                               "size_bytes, download_url}",
+                },
+                "raster_ids": {
+                    "dem":               "Elevation in metres (float32, nodata=-9999)",
+                    "flow_direction":    "D8 direction codes int16: 64=N,128=NE,1=E,2=SE,4=S,8=SW,16=W,32=NW. 0=nodata",
+                    "flow_accumulation": "Upstream cell count float32 — higher = larger contributing area (nodata=-1)",
+                },
+            },
+            "GET /api/v1/rasters/download/<raster_id>": {
+                "description": (
+                    "Stream a georeferenced GeoTIFF (LZW-compressed, WGS84/EPSG:4326). "
+                    "raster_id must be one of: dem, flow_direction, flow_accumulation. "
+                    "Rasters are pre-built at /dem/fetch time — download is instant."
+                ),
+                "query_params": {
+                    "session_id": "string REQUIRED",
+                    "raster_id":  "path param — dem | flow_direction | flow_accumulation",
+                },
+                "response": "image/tiff binary stream — open directly with rasterio, GDAL, or QGIS",
+                "example_url": "/api/v1/rasters/download/dem?session_id=<your_session_id>",
+            },
         },
     })
 
@@ -3528,6 +3627,8 @@ def v1_create_session():
     _sessions[sid] = {
         "cache":        {},
         "results":      [],
+        "rasters":      {},   # populated by _cache_session_rasters after /dem/fetch
+        "rasters_meta": {},
         "dem_progress": {
             "stage": "", "detail": "", "pct": 0,
             "source": "", "fallback_reason": "", "error": None, "done": False,
@@ -3539,9 +3640,87 @@ def v1_create_session():
 
 @app.route("/api/v1/session/<sid>", methods=["DELETE"])
 def v1_delete_session(sid):
-    """Free a session and release its cached DEM data."""
+    """Free a session and release its cached DEM data (including raster bytes)."""
     _sessions.pop(sid, None)
     return jsonify({"ok": True})
+
+
+# ── Rasters ───────────────────────────────────────────────────────────────────
+
+@app.route("/api/v1/rasters/list")
+def v1_rasters_list():
+    """
+    Return a manifest of downloadable GeoTIFF rasters for this session.
+    Available after /api/v1/dem/fetch completes.
+    Query param or body: session_id
+
+    Returns:
+      session_id  string
+      rasters     array of:
+        id            "dem" | "flow_direction" | "flow_accumulation"
+        filename      suggested save name
+        mime          "image/tiff"
+        dtype         numpy dtype string
+        nodata        nodata value
+        description   what the raster represents
+        crs           CRS string (e.g. "EPSG:4326")
+        shape         [rows, cols]
+        bounds        {south, north, west, east}
+        size_bytes    uncompressed file size
+        download_url  direct GET URL (includes session_id)
+    """
+    sid = _v1_sid()
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    sess    = _sessions[sid]
+    rasters = sess.get("rasters", {})
+    if not rasters:
+        return jsonify({"error": "No DEM loaded. Call /api/v1/dem/fetch first."}), 400
+    meta = sess.get("rasters_meta", {})
+    base = request.host_url.rstrip("/")
+    items = []
+    for rid, info in rasters.items():
+        items.append({
+            "id":           rid,
+            "filename":     info["filename"],
+            "mime":         "image/tiff",
+            "dtype":        info["dtype"],
+            "nodata":       info["nodata"],
+            "description":  info["description"],
+            "crs":          meta.get("crs", "EPSG:4326"),
+            "shape":        meta.get("shape", []),
+            "bounds":       meta.get("bounds", {}),
+            "size_bytes":   len(info["bytes"]),
+            "download_url": f"{base}/api/v1/rasters/download/{rid}?session_id={sid}",
+        })
+    return jsonify({"session_id": sid, "rasters": items})
+
+
+@app.route("/api/v1/rasters/download/<raster_id>")
+def v1_rasters_download(raster_id):
+    """
+    Stream a GeoTIFF raster for this session.
+    raster_id: dem | flow_direction | flow_accumulation
+    Query param or header: session_id
+    Returns: application/octet-stream GeoTIFF bytes (LZW compressed, georeferenced WGS84)
+    """
+    sid = _v1_sid()
+    if not sid or sid not in _sessions:
+        return jsonify({"error": "Invalid or missing session_id"}), 400
+    sess    = _sessions[sid]
+    rasters = sess.get("rasters", {})
+    if not rasters:
+        return jsonify({"error": "No DEM loaded. Call /api/v1/dem/fetch first."}), 400
+    if raster_id not in rasters:
+        return jsonify({"error": f"Unknown raster_id '{raster_id}'. "
+                                 f"Available: {list(rasters.keys())}"}), 404
+    info = rasters[raster_id]
+    return send_file(
+        io.BytesIO(info["bytes"]),
+        mimetype="image/tiff",
+        as_attachment=True,
+        download_name=info["filename"],
+    )
 
 
 # ── DEM ───────────────────────────────────────────────────────────────────────
@@ -3583,7 +3762,7 @@ def v1_fetch_dem():
                                  "'bbox': {south, north, west, east}"}), 400
 
     try:
-        with _use_session(sid):
+        with _use_session(sid) as sess:
             coords = polygon["coordinates"][0]
             lats   = [c[1] for c in coords]
             lons   = [c[0] for c in coords]
@@ -3610,6 +3789,7 @@ def v1_fetch_dem():
             n_segs = len(rivers.get("features", []))
             _emit_done(f"DEM ready · {_cache['shape'][0]}×{_cache['shape'][1]} cells "
                        f"· {n_segs} river segments")
+            _cache_session_rasters(sess)   # serialize rasters to GeoTIFF bytes once
             return jsonify({
                 "bounds":           {"south": wb[1], "west": wb[0],
                                      "north": wb[3], "east": wb[2]},
