@@ -81,6 +81,13 @@
     .btn-upload-dem:hover:not(:disabled) { background:#1e4a5e; }
     .btn-upload-dem:disabled { background:#1a2d40; color:var(--muted2); cursor:not-allowed; }
     .dem-source-label { font-size:10px; color:var(--muted2); text-align:center; margin-top:4px; }
+    .dem-source-picker { display:flex; align-items:center; gap:8px; margin:0 0 8px 0; font-size:11px; }
+    .dem-source-picker-lbl { color:var(--muted); font-weight:600; display:inline-flex; align-items:center; gap:4px; }
+    #dem-source-select {
+      flex:1; background:var(--panel2); color:var(--text); border:1px solid var(--border);
+      border-radius:4px; padding:5px 7px; font-size:11px; cursor:pointer;
+    }
+    #dem-source-select:focus { outline:1px solid var(--accent); }
     .btn-gpkg { background:#1a5c38; color:#fff; margin-bottom:7px; }
     .btn-gpkg:hover { background:#1f7046; }
     .btn-shp  { background:var(--border); color:var(--accent); }
@@ -238,6 +245,25 @@
     .leg-row { display:flex; align-items:center; gap:7px; margin-bottom:5px; }
     .leg-row:last-child { margin-bottom:0; }
 
+    /* River-refresh badge — small non-blocking indicator (top-left of map) */
+    #river-refresh-badge {
+      display:none; position:absolute; top:12px; left:56px; z-index:900;
+      background:rgba(13,26,39,.92); border:1px solid var(--border); border-radius:18px;
+      padding:6px 12px 6px 10px; font-size:11px; color:var(--text);
+      align-items:center; gap:8px; pointer-events:none;
+      box-shadow:0 2px 10px rgba(0,0,0,.35);
+    }
+    #river-refresh-badge.on { display:inline-flex; }
+    #river-refresh-badge.pending { opacity:.75; }
+    .rb-spinner {
+      width:12px; height:12px; border-radius:50%;
+      border:2px solid rgba(126,200,227,.25);
+      border-top-color:var(--accent);
+      animation:rb-spin .8s linear infinite;
+    }
+    @keyframes rb-spin { to { transform:rotate(360deg); } }
+    .rb-text { font-weight:500; letter-spacing:.2px; }
+
     /* Geocoder */
     .leaflet-control-geocoder { background:var(--panel) !important; border:1px solid var(--border) !important;
                                  border-radius:6px !important; box-shadow:0 2px 8px rgba(0,0,0,.4) !important; }
@@ -363,6 +389,22 @@
     <div class="sec-title">Step 2 — Load terrain</div>
     <input type="file" id="dem-file-input" accept=".tif,.tiff" style="display:none;"
            onchange="uploadDEM(this)"/>
+    <div class="dem-source-picker">
+      <label for="dem-source-select" class="dem-source-picker-lbl">
+        Source
+        <span class="help-icon">?<span class="tooltip-box">
+          <strong>Auto:</strong> Try OpenTopography SRTM (30 m). Fall back to AWS on failure.<br><br>
+          <strong>SRTM only:</strong> 30 m resolution. Fails if OpenTopography is unreachable.<br><br>
+          <strong>AWS Terrain Tiles:</strong> ~76 m, no API key — useful when SRTM is down
+          or rate-limited, or for very large areas where coarser data is fine.
+        </span></span>
+      </label>
+      <select id="dem-source-select">
+        <option value="aws" selected>AWS Terrain Tiles — ~76 m</option>
+        <option value="auto">Auto (SRTM → AWS fallback)</option>
+        <option value="srtm">SRTM only — 30 m (OpenTopography)</option>
+      </select>
+    </div>
     <div class="btn-row">
       <button id="download-btn" class="btn btn-download" disabled onclick="downloadDEM()">
         &#8659;&nbsp; Download DEM
@@ -396,7 +438,10 @@
         <span class="param-val" id="acc-val">500</span>
       </div>
       <input type="range" id="acc-slider" min="50" max="5000" value="500" step="50"/>
-      <div class="range-labels"><span>50 (dense)</span><span>5000 (sparse)</span></div>
+      <div class="range-labels">
+        <span id="acc-slider-min-lbl">50 (dense)</span>
+        <span id="acc-slider-max-lbl">5000 (sparse)</span>
+      </div>
       <div id="acc-effect" class="param-effect">→ Moderate stream network</div>
     </div>
   </div>
@@ -601,6 +646,12 @@
       <div id="legend-orders"></div>
     </div>
 
+    <!-- Inline river-refresh indicator (top-left, non-blocking) -->
+    <div id="river-refresh-badge">
+      <span class="rb-spinner"></span>
+      <span class="rb-text">Updating rivers…</span>
+    </div>
+
     <!-- Print preview panel -->
     <div id="preview-panel">
       <div id="preview-toolbar">
@@ -720,6 +771,7 @@ let nextId       = 1;
 let rasterLayers = { dem: null, acc: null, fdir: null };
 let orderLayers  = {};        // {order: L.geoJSON}
 let demBounds    = null;      // [[s,w],[n,e]]
+let _clickInFlight = false;   // true while snap+delineate is running — blocks rapid re-clicks
 
 const OUTLET_COLORS = [
   '#ff4444','#ff9900','#22cc66','#3399ff',
@@ -813,64 +865,82 @@ map.on('mouseout',  () => { _coordsEl.textContent = '— °   — °'; });
 // ── Map click → snap + delineate ─────────────────────────────────────────────
 map.on('click', e => {
   if (!demLoaded) return;
+  if (_clickInFlight) return;         // prevent duplicate requests on rapid clicks
   const acc = parseInt(document.getElementById('acc-slider').value);
   placeOutletAndDelineate(e.latlng.lat, e.latlng.lng, acc);
 });
 
-function placeOutletAndDelineate(lat, lon, acc) {
+async function placeOutletAndDelineate(lat, lon, acc) {
+  _clickInFlight = true;
   setStatus('Snapping to stream…', '');
   setLoader('Snapping click to nearest stream…', '');
 
-  fetch('/api/snap', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ lat, lon, acc_threshold: acc }),
-  })
-  .then(r => r.json())
-  .then(snap => {
-    if (snap.error) { hideLoader(); setStatus('Snap error: '+snap.error,'error'); return; }
+  let marker = null;
+  try {
+    const snapR = await apiFetch('/api/snap', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lat, lon, acc_threshold: acc }),
+    });
+    if (!snapR.ok) {
+      hideLoader();
+      const handled = await handleApiError(snapR);
+      if (!handled) setStatus('Snap error: ' + (snapR.data.error || 'unknown'), 'error');
+      return;
+    }
+    const snap = snapR.data;
 
     const id    = nextId++;
     const color = OUTLET_COLORS[(id-1) % OUTLET_COLORS.length];
 
-    setLoader('Running catchment delineation…', `Outlet #${id} at (${snap.lat.toFixed(4)}, ${snap.lon.toFixed(4)})`);
+    setLoader('Running catchment delineation…',
+              `Outlet #${id} at (${snap.lat.toFixed(4)}, ${snap.lon.toFixed(4)})`);
 
     // Place provisional marker immediately
-    const marker = L.circleMarker([snap.lat, snap.lon], {
-      radius:9, color:'#fff', weight:2.5, fillColor:color, fillOpacity:1,
-    }).addTo(map).bindTooltip(`<b>Outlet #${id}</b><br>Acc: ${snap.acc.toLocaleString()}${snap.snapped?'<br><i>snapped to stream</i>':''}`);
+    marker = L.circleMarker([snap.lat, snap.lon], {
+      radius: 9, color: '#fff', weight: 2.5, fillColor: color, fillOpacity: 1,
+    }).addTo(map).bindTooltip(
+      `<b>Outlet #${id}</b><br>Acc: ${snap.acc.toLocaleString()}` +
+      (snap.snapped ? '<br><i>snapped to stream</i>' : '')
+    );
 
-    return fetch('/api/delineate', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+    const delR = await apiFetch('/api/delineate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lat: snap.lat, lon: snap.lon, acc_threshold: acc }),
-    })
-    .then(r => r.json())
-    .then(result => {
-      hideLoader();
-      if (result.error) {
-        map.removeLayer(marker);
-        setStatus('Delineation error: '+result.error, 'error');
-        return;
-      }
-      // Draw catchment
-      let catchLayer = null;
-      if (result.catchment && result.catchment.features.length) {
-        catchLayer = L.geoJSON(result.catchment, {
-          style: { color: color, weight: 2.5, fillColor: color, fillOpacity: 0.15, dashArray: '6 3' },
-        }).addTo(map);
-      }
-      const outlet = { id, lat: snap.lat, lon: snap.lon, color, name: '', marker, catchLayer, stats: result.stats };
-      outlets.push(outlet);
-      renderOutletList();
-      document.getElementById('export-section').style.display = 'block';
-      document.getElementById('print-btn').disabled = false;
-      const s = result.stats;
-      setStatus(
-        `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped?' (snapped)':''}`,
-        'ok'
-      );
     });
-  })
-  .catch(err => { hideLoader(); setStatus('Error: '+err, 'error'); });
+    hideLoader();
+    if (!delR.ok) {
+      if (marker) map.removeLayer(marker);
+      const handled = await handleApiError(delR);
+      if (!handled) setStatus('Delineation error: ' + (delR.data.error || 'unknown'), 'error');
+      return;
+    }
+    const result = delR.data;
+    // Draw catchment
+    let catchLayer = null;
+    if (result.catchment && result.catchment.features.length) {
+      catchLayer = L.geoJSON(result.catchment, {
+        style: { color, weight: 2.5, fillColor: color, fillOpacity: 0.15, dashArray: '6 3' },
+      }).addTo(map);
+    }
+    const outlet = {
+      id, lat: snap.lat, lon: snap.lon, color, name: '',
+      marker, catchLayer, stats: result.stats,
+    };
+    outlets.push(outlet);
+    renderOutletList();
+    _refreshOutputActions();
+    const s = result.stats;
+    setStatus(
+      `✓ Outlet #${id}: ${s.area_km2} km² · max order ${s.max_strahler}${s.snapped ? ' (snapped)' : ''}`,
+      'ok'
+    );
+  } catch (err) {
+    hideLoader();
+    if (marker) map.removeLayer(marker);
+    setStatus('Error: ' + (err && err.message ? err.message : err), 'error');
+  } finally {
+    _clickInFlight = false;
+  }
 }
 
 // ── Outlet list ───────────────────────────────────────────────────────────────
@@ -947,36 +1017,34 @@ function submitPrint() {
   closePrintModal();
   const stopMapLoader = startStageLoader('Rendering map preview…', MAP_STAGES);
 
-  fetch('/api/print_map', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, paper, orientation: orient,
-                           acc_threshold: acc, outlets: outletData }),
-  })
-  .then(r => {
-    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Server error'); });
-    return r.blob();
-  })
-  .then(blob => {
+  (async () => {
+    const res = await apiFetch('/api/print_map', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, paper, orientation: orient,
+                             acc_threshold: acc, outlets: outletData }),
+    });
     stopMapLoader(); hideLoader();
+    if (!res.ok) {
+      const handled = await handleApiError(res);
+      if (!handled) setStatus('Print error: ' + (res.data.error || 'unknown'), 'error');
+      return;
+    }
+    const blob = res.data;
     // Revoke any previous preview blob URL
     const prevImg = document.getElementById('preview-img');
     if (prevImg._blobUrl) URL.revokeObjectURL(prevImg._blobUrl);
     const imgUrl = URL.createObjectURL(blob);
     prevImg._blobUrl  = imgUrl;
     prevImg._fileName = 'catchment_map.png';
-    // Draw on canvas with watermark baked in once image loads
     prevImg.onload = () => { _drawPreviewCanvas(); window._previewReset && window._previewReset(); };
     prevImg.src = imgUrl;
-    // Update title label in preview toolbar
     const titleEl = document.getElementById('preview-title-label');
     if (titleEl) titleEl.textContent = _lastExportParams.title || 'Catchment Map';
-    // Show preview tab and switch to it
     document.getElementById('map-tab-preview').style.display = 'flex';
     switchMapTab('preview');
     setStatus('Preview ready — click "Export ZIP" to download map + GeoJSON.', 'ok');
-  })
-  .catch(err => { stopMapLoader(); hideLoader(); setStatus('Print error: ' + err, 'error'); });
+  })();
 }
 
 // ── Report modal ──────────────────────────────────────────────────────────────
@@ -996,21 +1064,23 @@ function submitReport() {
     id: o.id, name: o.name || '', color: o.color
   }));
 
-  fetch('/api/report', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      title, author,
-      outlets: outletData,
-      acc_threshold: parseInt(document.getElementById('acc-slider').value) || 500
-    })
-  })
-  .then(r => {
-    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Report failed'); });
-    return r.blob();
-  })
-  .then(blob => {
+  (async () => {
+    const res = await apiFetch('/api/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title, author,
+        outlets: outletData,
+        acc_threshold: parseInt(document.getElementById('acc-slider').value) || 500
+      })
+    });
     stopRptLoader(); hideLoader();
+    if (!res.ok) {
+      const handled = await handleApiError(res);
+      if (!handled) showDemReportError('Report error: ' + (res.data.error || 'unknown'));
+      return;
+    }
+    const blob = res.data;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1018,28 +1088,43 @@ function submitReport() {
     a.click();
     URL.revokeObjectURL(url);
     setStatus('Report downloaded — open the .html file in your browser, then Print \u2192 Save as PDF.', 'ok');
-  })
-  .catch(e => { stopRptLoader(); hideLoader(); showDemReportError('Report error: ' + e.message); });
+  })();
 }
 
-function removeOutlet(id) {
+async function removeOutlet(id) {
   const idx = outlets.findIndex(o => o.id === id);
   if (idx < 0) return;
   const o = outlets[idx];
-  // Remove just this result from server (not all results)
-  fetch('/api/remove_result', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ idx })
-  });
+  // Hide locally first for responsiveness
   if (o.marker)     map.removeLayer(o.marker);
   if (o.catchLayer) map.removeLayer(o.catchLayer);
   outlets.splice(idx, 1);
   renderOutletList();
-  if (!outlets.length) {
-    document.getElementById('export-section').style.display = 'none';
-    document.getElementById('print-btn').disabled = true;
+  _refreshOutputActions();
+  setStatus('Removing outlet #' + id + '…', '');
+  // Await the server ack so we can detect and recover from a desync.
+  const res = await apiFetch('/api/remove_result', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idx })
+  });
+  if (!res.ok) {
+    // Rollback: put the outlet back and resync with the server.
+    if (o.marker)     o.marker.addTo(map);
+    if (o.catchLayer) o.catchLayer.addTo(map);
+    outlets.splice(idx, 0, o);
+    renderOutletList();
+    _refreshOutputActions();
+    const handled = await handleApiError(res);
+    if (!handled) setStatus('Remove failed: ' + (res.data.error || 'server error'), 'error');
+    return;
   }
-  setStatus('Outlet #'+id+' removed.', '');
+  // Detect silent desync — server's post-op count should match ours
+  if (typeof res.data.n_results === 'number' && res.data.n_results !== outlets.length) {
+    await resyncServerState();
+    setStatus('Synchronised with server — outlet list corrected.', '');
+    return;
+  }
+  setStatus('Outlet #' + id + ' removed.', '');
 }
 
 function clearAllOutlets() {
@@ -1115,9 +1200,27 @@ function _handleDemResponse(info, _unused, sourceLabel) {
 
   map.fitBounds(demBounds, { padding:[20,20] });
 
-  const p95 = Math.round(info.acc_p95 / 50) * 50;
-  document.getElementById('acc-slider').value = p95;
-  document.getElementById('acc-val').textContent = p95;
+  // Slider MUST match the threshold used to build info.rivers (default_acc),
+  // not the raw 95th percentile — _auto_threshold may have bumped default_acc
+  // higher to keep the initial network under the 3000-segment cap.  If we set
+  // the slider to acc_p95 instead, the slider's number is lower than what the
+  // map actually shows, and any Print/Export would rebuild rivers at that
+  // lower threshold → many more rivers and very slow rendering.
+  const sliderInit = Math.max(50, Math.round((info.default_acc || info.acc_p95) / 50) * 50);
+  const accSlider  = document.getElementById('acc-slider');
+  // Reset to the default 5000 ceiling so a previous larger DEM doesn't leave
+  // the range inflated; then expand only if this DEM needs it.
+  accSlider.max = 5000;
+  const neededMax = Math.max(5000, Math.ceil((sliderInit * 2) / 50) * 50);
+  if (parseInt(accSlider.max, 10) < neededMax) accSlider.max = neededMax;
+  // Keep the range-labels under the slider consistent with the actual bounds
+  // so the user always knows how far they can move it.
+  const _minLbl = document.getElementById('acc-slider-min-lbl');
+  const _maxLbl = document.getElementById('acc-slider-max-lbl');
+  if (_minLbl) _minLbl.textContent = `${accSlider.min} (dense)`;
+  if (_maxLbl) _maxLbl.textContent = `${accSlider.max} (sparse)`;
+  accSlider.value = sliderInit;
+  document.getElementById('acc-val').textContent = sliderInit;
   updateEffectLabel();
 
   if (info.rivers && info.rivers.features.length) {
@@ -1131,8 +1234,9 @@ function _handleDemResponse(info, _unused, sourceLabel) {
   document.getElementById('params-section').style.display  = 'block';
   document.getElementById('raster-section').style.display  = 'block';
   document.getElementById('outlets-section').style.display = 'block';
-  document.getElementById('export-section').style.display  = 'block';
-  document.getElementById('print-btn').disabled = true;
+  // Export/print/report remain hidden until at least one outlet is delineated —
+  // otherwise users can click Export and hit "No delineation results".
+  _refreshOutputActions();
 
   const nSegs = info.rivers ? info.rivers.features.length : 0;
   document.getElementById('instruction-text').textContent =
@@ -1153,12 +1257,28 @@ function _handleDemResponse(info, _unused, sourceLabel) {
 // ── Download DEM ──────────────────────────────────────────────────────────────
 function downloadDEM() {
   if (!drawnPolygon) return;
+  // Re-downloading wipes server-side catchment results.  Confirm first so a
+  // user who has delineated doesn't lose their work with a single click.
+  if (outlets.length > 0) {
+    const ok = window.confirm(
+      'Downloading a new DEM will clear your ' + outlets.length + ' delineated catchment' +
+      (outlets.length > 1 ? 's' : '') + '.\n\nContinue?'
+    );
+    if (!ok) return;
+  }
   _clearPreviousDEM();
-  setLoader('Contacting OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles…');
+  const srcSel  = document.getElementById('dem-source-select');
+  const source  = (srcSel && srcSel.value) || 'auto';
+  const loaderMsg = {
+    'auto': ['Contacting OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles — will fall back to AWS if needed…'],
+    'srtm': ['Contacting OpenTopography…', 'Requesting SRTM GL1 (30 m) tiles (no fallback)…'],
+    'aws':  ['Contacting AWS Terrain Tiles…', 'Requesting ~76 m elevation tiles…'],
+  }[source];
+  setLoader(loaderMsg[0], loaderMsg[1]);
   startProgressPoll();
   fetch('/api/fetch_dem', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ polygon: drawnPolygon }),
+    body: JSON.stringify({ polygon: drawnPolygon, source }),
   })
   .then(r => r.json().then(d => ({ status: r.status, ok: r.ok, data: d })))
   .then(({ status, ok, data: info }) => {
@@ -1194,6 +1314,13 @@ function downloadDEM() {
 function uploadDEM(input) {
   const file = input.files[0];
   if (!file) return;
+  if (outlets.length > 0) {
+    const ok = window.confirm(
+      'Uploading a new DEM will clear your ' + outlets.length + ' delineated catchment' +
+      (outlets.length > 1 ? 's' : '') + '.\n\nContinue?'
+    );
+    if (!ok) { input.value = ''; return; }
+  }
   input.value = '';
   _clearPreviousDEM();
   const _lbl = document.getElementById('dem-source-label');
@@ -1227,26 +1354,87 @@ function clearRivers() {
   document.getElementById('river-section').style.display = 'none';
 }
 
-let _riverTimer = null;
+// Show/hide the small on-map river-refresh indicator.
+// state: 'pending' — slider moved, awaiting debounce; 'active' — request running; null — hide.
+function _riverBadge(state) {
+  const el = document.getElementById('river-refresh-badge');
+  if (!el) return;
+  if (!state) { el.classList.remove('on', 'pending'); return; }
+  const txt = el.querySelector('.rb-text');
+  if (state === 'pending') {
+    el.classList.add('on', 'pending');
+    if (txt) txt.textContent = 'Threshold changed…';
+  } else {
+    el.classList.remove('pending');
+    el.classList.add('on');
+    if (txt) txt.textContent = 'Updating rivers…';
+  }
+}
+
+let _riverTimer  = null;
+let _riverReqSeq = 0;     // monotonic id so out-of-order responses are discarded
+let _riverAbort  = null;  // AbortController for the in-flight request
 function scheduleRiverRefresh() {
   if (!demLoaded) return;
+  _riverBadge('pending');
   clearTimeout(_riverTimer);
-  _riverTimer = setTimeout(() => {
-    const acc = parseInt(document.getElementById('acc-slider').value);
+  // Cancel any in-flight fetch — the user has moved the slider again and
+  // we don't want to wait for a stale threshold to come back.
+  if (_riverAbort) { try { _riverAbort.abort(); } catch(e) {} _riverAbort = null; }
+  _riverTimer = setTimeout(async () => {
+    const acc    = parseInt(document.getElementById('acc-slider').value);
+    const reqId  = ++_riverReqSeq;
+    const abort  = new AbortController();
+    _riverAbort  = abort;
+    _riverBadge('active');
     setStatus('Refreshing river network…', '');
-    fetch('/api/rivers', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+    const res = await apiFetch('/api/rivers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ acc_threshold: acc }),
-    })
-    .then(r => r.json())
-    .then(data => {
-      if (data.rivers) {
-        clearRivers();
-        buildOrderLayers(data.rivers);
-        setStatus(`River network updated — ${data.rivers.features.length} segments`, 'ok');
-      }
+      signal: abort.signal,
     });
-  }, 600);
+    // If another drag superseded us, bail silently — don't touch the badge
+    // or status, that belongs to the newer in-flight request.
+    if (reqId !== _riverReqSeq) return;
+    if (res.aborted) return;
+    _riverAbort = null;
+    if (!res.ok) {
+      _riverBadge(null);
+      const handled = await handleApiError(res);
+      if (!handled) setStatus('River refresh failed: ' + (res.data.error || 'unknown'), 'error');
+      return;
+    }
+    if (res.data.rivers) {
+      // Build new Leaflet layers BEFORE clearing old ones so the map never
+      // blinks empty during the swap.
+      swapRiverLayers(res.data.rivers);
+      setStatus(`River network updated — ${res.data.rivers.features.length} segments`, 'ok');
+    }
+    _riverBadge(null);
+  }, 350);  // tighter debounce is fine now that we cancel cleanly
+}
+
+// Replace the current river overlays with new ones without a visible gap.
+function swapRiverLayers(riverFC) {
+  if (!riverFC || !riverFC.features.length) {
+    clearRivers();
+    return;
+  }
+  const orders = [...new Set(riverFC.features.map(f => f.properties.order))].sort((a,b)=>a-b);
+  const next = {};
+  orders.forEach(ord => {
+    const fc = { type:'FeatureCollection', features: riverFC.features.filter(f => f.properties.order===ord) };
+    next[ord] = L.geoJSON(fc, {
+      style: { color: riverColor(ord), weight: riverWeight(ord), opacity: 0.9 },
+      onEachFeature: (f, layer) => layer.bindTooltip(`Strahler order ${ord}`)
+    }).addTo(map);
+  });
+  // Drop the old layers after the new ones are on the map.
+  Object.values(orderLayers).forEach(l => map.removeLayer(l));
+  orderLayers = next;
+  buildOrderToggles(orders);
+  buildLegend(orders);
+  document.getElementById('river-section').style.display = 'block';
 }
 
 function buildOrderLayers(riverFC) {
@@ -1433,25 +1621,26 @@ function exportResultsZip() {
   const btn = document.getElementById('preview-dl-btn');
   const orig = btn.textContent;
   btn.textContent = 'Building export…'; btn.disabled = true;
-  fetch('/api/export_results', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(_lastExportParams),
-  })
-  .then(r => {
-    if (!r.ok) return r.json().then(d => { throw new Error(d.error || 'Export failed.'); });
-    return r.blob();
-  })
-  .then(blob => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+  (async () => {
+    const res = await apiFetch('/api/export_results', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_lastExportParams),
+    });
+    btn.textContent = orig; btn.disabled = false;
+    if (!res.ok) {
+      const handled = await handleApiError(res);
+      if (!handled) setStatus('Export error: ' + (res.data.error || 'unknown'), 'error');
+      return;
+    }
+    const blob = res.data;
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
     const title = (_lastExportParams.title || 'catchment_results').replace(/[^a-zA-Z0-9 _-]/g, '').trim();
     a.href = url; a.download = title + '.zip'; a.click();
     URL.revokeObjectURL(url);
     setStatus('Export downloaded.', 'ok');
-    btn.textContent = orig; btn.disabled = false;
-  })
-  .catch(e => { setStatus('Export error: ' + e.message, 'error'); btn.textContent = orig; btn.disabled = false; });
+  })();
 }
 
 // ── Watermark baked into canvas ───────────────────────────────────────────────
@@ -1725,6 +1914,124 @@ function setStatus(msg, cls) {
   el.textContent = msg;
   el.className   = cls || '';
 }
+
+// ── Unified API helper with structured error detection ───────────────────────
+// apiFetch returns { ok, status, data }.  `data` is parsed JSON for
+// application/json responses, or a Blob otherwise.  Never throws for
+// HTTP-level errors — callers inspect `ok` and `data.error` / `data.code`.
+async function apiFetch(url, opts) {
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (e) {
+    // Caller passed an AbortSignal and called abort() — not a real failure.
+    if (e && e.name === 'AbortError')
+      return { ok: false, aborted: true, data: { error: 'aborted' } };
+    return { ok: false, status: 0, network: true,
+             data: { error: 'Network error — could not reach the server.' } };
+  }
+  const ct = (r.headers.get('content-type') || '').toLowerCase();
+  let data;
+  if (ct.includes('application/json')) {
+    try { data = await r.json(); }
+    catch (e) {
+      if (e && e.name === 'AbortError') return { ok: false, aborted: true, data: { error: 'aborted' } };
+      data = { error: 'Invalid JSON from server.' };
+    }
+  } else if (r.ok) {
+    try { data = await r.blob(); }
+    catch (e) {
+      if (e && e.name === 'AbortError') return { ok: false, aborted: true, data: { error: 'aborted' } };
+      throw e;
+    }
+  } else {
+    const txt = await r.text().catch(() => '');
+    try { data = JSON.parse(txt); } catch (e) { data = { error: txt || `HTTP ${r.status}` }; }
+  }
+  return { ok: r.ok, status: r.status, data };
+}
+
+// Reconcile client UI state with the server's view.  Returns the server
+// snapshot.  Called after any NO_DEM / NO_RESULTS error and on page load.
+async function resyncServerState() {
+  const r = await apiFetch('/api/state');
+  if (!r.ok) return null;
+  const s = r.data;
+  // DEM side
+  if (!s.dem_loaded && demLoaded) {
+    demLoaded = false;
+    demBounds = null;
+    ['dem','acc','fdir'].forEach(k => {
+      if (rasterLayers[k]) { map.removeLayer(rasterLayers[k]); rasterLayers[k] = null; }
+    });
+    clearRivers();
+    ['dem-info','params-section','raster-section','outlets-section','export-section']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
+    const pb = document.getElementById('print-btn'); if (pb) pb.disabled = true;
+  }
+  // Catchment side — server has fewer results than client believes
+  if (s.n_results < outlets.length) {
+    // Server truth is fewer results — drop extra outlets from the tail
+    while (outlets.length > s.n_results) {
+      const o = outlets.pop();
+      if (o.marker)     map.removeLayer(o.marker);
+      if (o.catchLayer) map.removeLayer(o.catchLayer);
+    }
+    renderOutletList();
+    _refreshOutputActions();
+  }
+  return s;
+}
+
+// Centralised error handler for responses from the API.  If the server
+// returned a structured state-loss code, we resync and show a helpful
+// recovery banner; otherwise we just surface the error text.
+// Returns true when the error was "handled" (state-loss path taken) so
+// callers can skip their own generic setStatus.
+async function handleApiError(res, opts) {
+  opts = opts || {};
+  const d      = (res && res.data) || {};
+  const code   = d.code;
+  const errMsg = d.error || 'Server error.';
+
+  if (code === 'NO_DEM') {
+    await resyncServerState();
+    const msg = 'Server has no DEM loaded — please (re-)draw a polygon and click Download DEM.';
+    if (opts.banner !== false) showDemReportError(msg);
+    setStatus(msg, 'error');
+    return true;
+  }
+  if (code === 'NO_RESULTS') {
+    await resyncServerState();
+    const msg = outlets.length
+      ? 'Server lost its delineation state — please click on a stream to re-delineate.'
+      : 'No delineated catchments yet — click on a stream to place an outlet.';
+    setStatus(msg, outlets.length ? 'error' : '');
+    return true;
+  }
+  if (code === 'OUT_OF_BOUNDS') {
+    setStatus('Click was outside the loaded DEM. Place outlets inside the drawn polygon.', 'error');
+    return true;
+  }
+  if (code === 'CATCHMENT_TOO_SMALL') {
+    setStatus('Catchment too small at this click — lower the threshold or click closer to a stream.', 'error');
+    return true;
+  }
+  if (code === 'VECTORISE_FAILED') {
+    setStatus('Could not vectorise the catchment — try a slightly different click.', 'error');
+    return true;
+  }
+  return false;  // unhandled — caller should show errMsg
+}
+
+// Show/hide export/print/report based on whether we have anything to export.
+function _refreshOutputActions() {
+  const hasOutlets = outlets.length > 0;
+  const sec = document.getElementById('export-section');
+  if (sec) sec.style.display = hasOutlets ? 'block' : 'none';
+  const pb = document.getElementById('print-btn');
+  if (pb) pb.disabled = !hasOutlets;
+}
 function setLoader(text, detail, pct) {
   document.getElementById('loader-text').textContent   = text   || 'Processing…';
   document.getElementById('loader-detail').textContent = detail || '';
@@ -1831,6 +2138,20 @@ function stopProgressPoll() {
 }
 
 updateEffectLabel();
+
+// ── Startup state check ──────────────────────────────────────────────────────
+// If the browser is reloaded while the server still has DEM + results, reflect
+// that fact in the status bar.  If the server has been restarted but the
+// browser has stale local state (rare on a fresh page load, but possible with
+// bfcache), resyncServerState() already drops our stale flags.
+(async () => {
+  try {
+    const s = await resyncServerState();
+    if (s && s.dem_loaded && s.n_results > 0) {
+      setStatus('Server still has an active session — refresh it by drawing + downloading a new DEM.', '');
+    }
+  } catch (e) { /* silent — server unreachable; regular fetches will surface it */ }
+})();
 
 // ── Middle-mouse-button pan (polygon + rectangle draw tools) ──────────────────
 (function() {

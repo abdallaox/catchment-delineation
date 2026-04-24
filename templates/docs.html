@@ -328,19 +328,30 @@ curl -s "https://your-app.railway.app/api/v1/export/download/$TOKEN" -o results.
     <!-- ── ERRORS ────────────────────────────────────────────────────────── -->
     <div id="errors" class="section">
       <h2>Error Format</h2>
-      <p>All errors return an appropriate HTTP status code with a JSON body. No HTML error pages.</p>
+      <p>All errors return an appropriate HTTP status code with a JSON body. No HTML error pages. Structural state-loss errors also include a machine-readable <code>code</code> field so clients can branch without parsing English prose.</p>
       <div class="code-block">
         <button class="copy-btn">Copy</button>
-        <pre><code class="language-json">{"error": "No DEM loaded. Call /api/v1/dem/fetch first."}
+        <pre><code class="language-json">{"error": "No DEM loaded. Call /api/v1/dem/fetch first.", "code": "NO_DEM"}
 
 // 500 errors also include a traceback:
 {"error": "...", "trace": "Traceback (most recent call last):\n..."}</code></pre>
       </div>
+      <h3>HTTP status</h3>
       <table>
-        <tr><th>Code</th><th>Meaning</th></tr>
-        <tr><td><code>400</code></td><td>Missing or invalid parameters</td></tr>
+        <tr><th>Status</th><th>Meaning</th></tr>
+        <tr><td><code>400</code></td><td>Missing or invalid parameters / precondition not met</td></tr>
         <tr><td><code>404</code></td><td>Unknown session, raster_id, or token</td></tr>
         <tr><td><code>500</code></td><td>Server-side processing error (includes trace)</td></tr>
+      </table>
+      <h3>Structured <code>code</code> values</h3>
+      <table>
+        <tr><th>Code</th><th>Meaning</th></tr>
+        <tr><td><code>SESSION_INVALID</code></td><td>Missing, unknown, or expired <code>session_id</code>. Create a new one via <code>POST /api/v1/session</code>.</td></tr>
+        <tr><td><code>NO_DEM</code></td><td>The session has no loaded DEM. Call <code>POST /api/v1/dem/fetch</code> first.</td></tr>
+        <tr><td><code>NO_RESULTS</code></td><td>No catchments delineated yet. Call <code>POST /api/v1/delineate</code> before <code>report</code> / <code>export</code>.</td></tr>
+        <tr><td><code>OUT_OF_BOUNDS</code></td><td>The supplied <code>lat</code>/<code>lon</code> is outside the loaded DEM bounds.</td></tr>
+        <tr><td><code>CATCHMENT_TOO_SMALL</code></td><td>Delineation produced fewer than 10 cells — lower <code>acc_threshold</code> or move upstream.</td></tr>
+        <tr><td><code>VECTORISE_FAILED</code></td><td>Internal: couldn't build a polygon from the catchment mask.</td></tr>
       </table>
     </div>
 
@@ -406,6 +417,12 @@ curl -s "https://your-app.railway.app/api/v1/export/download/$TOKEN" -o results.
         <tr><td><code>session_id</code></td><td>string</td><td><span class="req">required</span></td><td>Session identifier</td></tr>
         <tr><td><code>bbox</code></td><td>object</td><td><span class="req">one of</span></td><td><code>{south, north, west, east}</code> in decimal degrees WGS84</td></tr>
         <tr><td><code>polygon</code></td><td>object</td><td><span class="req">one of</span></td><td>GeoJSON Polygon geometry (<code>type</code> + <code>coordinates</code>)</td></tr>
+        <tr><td><code>source</code></td><td>string</td><td>optional</td><td>
+          <code>"auto"</code> (default) tries OpenTopography SRTM first, falls back to AWS Terrain Tiles on failure.
+          <code>"srtm"</code> forces SRTM only — returns <code>HTTP 500</code> if OpenTopography is unreachable (useful when you need the 30 m resolution guaranteed).
+          <code>"aws"</code> skips SRTM and fetches AWS Terrain Tiles directly (~76 m, no API key) — handy when the OpenTopography key is rate-limited or for very large areas.
+          Omitting the field preserves the original behaviour, so existing integrations need no change.
+        </td></tr>
       </table>
 
       <h3>Response</h3>

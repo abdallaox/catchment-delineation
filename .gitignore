@@ -31,3 +31,11 @@ cwi_results*
 # OS
 .DS_Store
 Thumbs.db
+
+# Local server launcher (contains secrets)
+start_server.bat
+*.log
+app_out.log
+app_err.log
+server.log
+server_err.log
