@@ -694,8 +694,10 @@ def load_and_condition(dem_path):
         ps_grid=grid, ps_fdir=fdir_ps,
         strahler_cache={}, rivers_cache={},
     )
-    # Any previously-cached print PNG or hillshade is stale for the new DEM.
+    # Any previously-cached print PNG, hillshade, or raster GeoTIFF bytes are
+    # stale for the new DEM.
     _state().pop("last_print_png", None)
+    _state().pop("_export_rasters", None)
     print(f"  Ready. shape={nrows}×{ncols}  bounds={[round(v,4) for v in bounds_wgs]}")
     return _cache
 
@@ -2446,6 +2448,23 @@ def _build_export_zip(data: dict) -> io.BytesIO:
         def _gdf_to_geojson_bytes(gdf):
             return gdf.to_json().encode("utf-8") if not gdf.empty else b'{"type":"FeatureCollection","features":[]}'
 
+        # ── Build raster GeoTIFFs (DEM + D8 routing) ────────────────────────
+        # Cached on the state so repeat exports of the same DEM don't pay the
+        # LZW compression cost twice (dem_arr/acc_arr/fdir_arr only change
+        # when a new DEM is loaded — load_and_condition wipes this entry).
+        rasters = _state().get("_export_rasters")
+        if not rasters:
+            dem_arr  = _cache["dem_arr"].copy()
+            dem_arr[~np.isfinite(dem_arr)] = -9999.0
+            acc_arr  = _cache["acc_arr"].copy()
+            fdir_arr = _cache["fdir_arr"].copy().astype(np.int16)
+            rasters = {
+                "dem.tif":               _raster_to_bytes(dem_arr,  "float32", -9999.0),
+                "flow_direction.tif":    _raster_to_bytes(fdir_arr, "int16",   0),
+                "flow_accumulation.tif": _raster_to_bytes(acc_arr,  "float32", -1.0),
+            }
+            _state()["_export_rasters"] = rasters
+
         # ── Assemble ZIP ────────────────────────────────────────────────────
         zip_buf = io.BytesIO()
         safe_title = re.sub(r'[^a-zA-Z0-9 _-]', '', title).strip() or "catchment_results"
@@ -2454,6 +2473,8 @@ def _build_export_zip(data: dict) -> io.BytesIO:
             zf.writestr("catchments.geojson",  _gdf_to_geojson_bytes(catches_gdf))
             zf.writestr("outlets.geojson",     _gdf_to_geojson_bytes(outlets_gdf))
             zf.writestr("rivers.geojson",      _gdf_to_geojson_bytes(rivers_all_gdf))
+            for arcname, payload in rasters.items():
+                zf.writestr(arcname, payload)
         zip_buf.seek(0)
         return zip_buf, safe_title
 
